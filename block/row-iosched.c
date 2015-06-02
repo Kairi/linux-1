@@ -153,7 +153,7 @@ struct row_data {
 	unsigned int			cycle_flags;
 };
 
-#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elv.priv[0]))
+#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elv.priv[0])) // modify
 
 #define row_log(q, fmt, args...)   \
 	blk_add_trace_msg(q, "%s():" fmt , __func__, ##args)
@@ -314,7 +314,6 @@ static int row_reinsert_req(struct request_queue *q,
 
 /**
  * row_urgent_pending() - Return TRUE if there is an urgent
- *			  request on scheduler
  * @q:	requests queue
  */
 static bool row_urgent_pending(struct request_queue *q)
