@@ -1,0 +1,1541 @@
+From a8a2b169b74360f49ad52f5bcab961e9cdb94115 Mon Sep 17 00:00:00 2001
+From: Tatyana Brokhman <tlinder@codeaurora.org>
+Date: Sat, 28 Mar 2015 23:01:02 +0100
+Subject: [PATCH] block: Adding ROW scheduling algorithm
+
+This patch adds the implementation of a new scheduling algorithm - ROW.
+The policy of this algorithm is to prioritize READ requests over WRITE
+as much as possible without starving the WRITE requests.
+
+Change-Id: I4ed52ea21d43b0e7c0769b2599779a3d3869c519
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: ROW: Correct minimum values of ROW tunable parameters
+
+The ROW scheduling algorithm exposes several tunable parameters.
+This patch updates the minimum allowed values for those parameters.
+
+Change-Id: I5ec19d54b694e2e83ad5376bd99cc91f084967f5
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: ROW: Fix forced dispatch
+
+This patch fixes forced dispatch in the ROW scheduling algorithm.
+When the dispatch function is called with the forced flag on, we
+can't delay the dispatch of the requests that are in scheduler queues.
+Thus, when dispatch is called with forced turned on, we need to cancel
+idling, or not to idle at all.
+
+Change-Id: I3aa0da33ad7b59c0731c696f1392b48525b52ddc
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: Add support for reinsert a dispatched req
+
+Add support for reinserting a dispatched request back to the
+scheduler's internal data structures.
+This capability is used by the device driver when it chooses to
+interrupt the current request transmission and execute another (more
+urgent) pending request. For example: interrupting long write in order
+to handle pending read. The device driver re-inserts the
+remaining write request back to the scheduler, to be rescheduled
+for transmission later on.
+
+Add API for verifying whether the current scheduler
+supports reinserting requests mechanism. If reinsert mechanism isn't
+supported by the scheduler, this code path will never be activated.
+
+Change-Id: I5c982a66b651ebf544aae60063ac8a340d79e67f
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: Add API for urgent request handling
+
+This patch add support in block & elevator layers for handling
+urgent requests. The decision if a request is urgent or not is taken
+by the scheduler. Urgent request notification is passed to the underlying
+block device driver (eMMC for example). Block device driver may decide to
+interrupt the currently running low priority request to serve the new
+urgent request. By doing so READ latency is greatly reduced in read&write
+collision scenarios.
+
+Note that if the current scheduler doesn't implement the urgent request
+mechanism, this code path is never activated.
+
+Change-Id: I8aa74b9b45c0d3a2221bd4e82ea76eb4103e7cfa
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+row: Adding support for reinsert already dispatched req
+
+Add support for reinserting already dispatched request back to the
+schedulers internal data structures.
+The request will be reinserted back to the queue (head) it was
+dispatched from as if it was never dispatched.
+
+Change-Id: I70954df300774409c25b5821465fb3aa33d8feb5
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block:row: fix idling mechanism in ROW
+
+This patch addresses the following issues found in the ROW idling
+mechanism:
+1. Fix the delay passed to queue_delayed_work (pass actual delay
+   and not the time when to start the work)
+2. Change the idle time and the idling-trigger frequency to be
+   HZ dependent (instead of using msec_to_jiffies())
+3. Destroy idle_workqueue() in queue_exit
+
+Change-Id: If86513ad6b4be44fb7a860f29bd2127197d8d5bf
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+cfq-iosched: Fix null pointer dereference
+
+NULL pointer dereference can happen in cfq_choose_cfqg()
+when there are no cfq groups to select other than the
+current serving group. Prevent this by adding a NULL
+check before dereferencing.
+
+Unable to handle kernel NULL pointer dereference at virtual address
+[<c02502cc>] (cfq_dispatch_requests+0x368/0x8c0) from
+[<c0243f30>] (blk_peek_request+0x220/0x25c)
+[<c0243f30>] (blk_peek_request+0x220/0x25c) from
+[<c0243f74>] (blk_fetch_request+0x8/0x1c)
+[<c0243f74>] (blk_fetch_request+0x8/0x1c) from
+[<c041cedc>] (mmc_queue_thread+0x58/0x120)
+[<c041cedc>] (mmc_queue_thread+0x58/0x120) from
+[<c00ad310>] (kthread+0x84/0x90)
+[<c00ad310>] (kthread+0x84/0x90) from
+[<c000eeac>] (kernel_thread_exit+0x0/0x8)
+
+CRs-Fixed: 416466
+Change-Id: I1fab93a4334b53e1d7c5dcc8f93cff174bae0d5e
+Signed-off-by: Sujit Reddy Thumma <sthumma@codeaurora.org>
+
+row: Add support for urgent request handling
+
+This patch adds support for handling urgent requests.
+ROW queue can be marked as "urgent" so if it was un-served in last
+dispatch cycle and a request was added to it - it will trigger
+issuing an urgent-request-notification to the block device driver.
+The block device driver may choose at stop the transmission of current
+ongoing request to handle the urgent one. Foe example: long WRITE may
+be stopped to handle an urgent READ. This decreases READ latency.
+
+Change-Id: I84954c13f5e3b1b5caeadc9fe1f9aa21208cb35e
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Add some debug information on ROW queues
+
+1. Add a counter for number of requests on queue.
+2. Add function to print queues status (number requests
+   currently on queue and number of already dispatched requests
+   in current dispatch cycle).
+
+Change-Id: I1e98b9ca33853e6e6a8ddc53240f6cd6981e6024
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Insert dispatch_quantum into struct row_queue
+
+There is really no point in keeping the dispatch quantum
+of a queue outside of it. By inserting it to the row_queue
+structure we spare extra level in accessing it.
+
+Change-Id: Ic77571818b643e71f9aafbb2ca93d0a92158b199
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: fix sysfs functions - idle_time conversion
+
+idle_time was updated to be stored in msec instead of jiffies.
+So there is no need to convert the value when reading from user or
+displaying the value to him.
+
+Change-Id: I58e074b204e90a90536d32199ac668112966e9cf
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Aggregate row_queue parameters to one structure
+
+Each ROW queues has several parameters which default values are defined
+in separate arrays. This patch aggregates all default values into one
+array.
+The values in question are:
+ - is idling enabled for the queue
+ - queue quantum
+ - can the queue notify on urgent request
+
+Change-Id: I3821b0a042542295069b340406a16b1000873ec6
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Dispatch requests according to their io-priority
+
+This patch implements "application-hints" which is a way the issuing
+application can notify the scheduler on the priority of its request.
+This is done by setting the io-priority of the request.
+This patch reuses an already existing mechanism of io-priorities developed
+for CFQ. Please refer to kernel/Documentation/block/ioprio.txt for
+usage example and explanations.
+
+Change-Id: I228ec8e52161b424242bb7bb133418dc8b73925a
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Idling mechanism re-factoring
+
+At the moment idling in ROW is implemented by delayed work that uses
+jiffies granularity which is not very accurate. This patch replaces
+current idling mechanism implementation with hrtime API, which gives
+nanosecond resolution (instead of jiffies).
+
+Change-Id: I86c7b1776d035e1d81571894b300228c8b8f2d92
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Don't notify URGENT if there are un-completed urgent req
+
+When ROW scheduler reports to the block layer that there is an urgent
+request pending, the device driver may decide to stop the transmission
+of the current request in order to handle the urgent one. If the current
+transmitted request is an urgent request - we don't want it to be
+stopped.
+Due to the above ROW scheduler won't notify of an urgent request if
+there are urgent requests in flight.
+
+Change-Id: I2fa186d911b908ec7611682b378b9cdc48637ac7
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Update initial values of ROW data structures
+
+This patch sets the initial values of internal ROW
+parameters.
+
+Change-Id: I38132062a7fcbe2e58b9cc757e55caac64d013dc
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+[smuckle@codeaurora.org: ported from msm-3.7]
+Signed-off-by: Steve Muckle <smuckle@codeaurora.org>
+
+block: add REQ_URGENT to request flags
+
+This patch adds a new flag to be used in cmd_flags field of struct request
+for marking request as urgent.
+Urgent request is the one that should be given priority currently handled
+(regular) request by the device driver. The decision of a request urgency
+is taken by the scheduler.
+
+Change-Id: Ic20470987ef23410f1d0324f96f00578f7df8717
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Re-design urgent request notification mechanism
+
+When ROW scheduler reports to the block layer that there is an urgent
+request pending, the device driver may decide to stop the transmission
+of the current request in order to handle the urgent one. This is done
+in order to reduce the latency of an urgent request. For example:
+long WRITE may be stopped to handle an urgent READ.
+
+This patch updates the ROW URGENT notification policy to apply with the
+below:
+
+- Don't notify URGENT if there is an un-completed URGENT request in driver
+- After notifying that URGENT request is present, the next request
+  dispatched is the URGENT one.
+- At every given moment only 1 request can be marked as URGENT.
+  Independent of it's location (driver or scheduler)
+
+Other changes to URGENT policy:
+- Only READ queues are allowed to notify of an URGENT request pending.
+
+CR fix:
+If a pending urgent request (A) gets merged with another request (B)
+A is removed from scheduler queue but is not removed from
+rd->pending_urgent_rq.
+
+CRs-Fixed: 453712
+Change-Id: I321e8cf58e12a05b82edd2a03f52fcce7bc9a900
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: urgent request: remove unnecessary urgent marking
+
+An urgent request is marked by the scheduler in rq->cmd_flags with the
+REQ_URGENT flag. There is no need to add an additional marking by
+the block layer.
+
+Change-Id: I05d5e9539d2f6c1bfa80240b0671db197a5d3b3f
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Prevent starvation of regular priority by high priority
+
+At the moment all REGULAR and LOW priority requests are starved as long as
+there are HIGH priority requests to dispatch.
+This patch prevents the above starvation by setting a starvation limit the
+REGULAR\LOW priority requests can tolerate.
+
+Change-Id: Ibe24207982c2c55d75c0b0230f67e013d1106017
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Update sysfs functions
+
+All ROW (time related) configurable parameters are stored in ms so there
+is no need to convert from/to ms when reading/updating them via sysfs.
+
+Change-Id: Ib6a1de54140b5d25696743da944c076dd6fc02ae
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: urgent request: Update dispatch_urgent in case of requeue/reinsert
+
+The block layer implements a mechanism for verifying that the device
+driver won't be notified of an URGENT request if there is already an
+URGENT request in flight. This is due to the fact that interrupting an
+URGENT request isn't efficient.
+This patch fixes the above described mechanism in case the URGENT request
+was returned back to the block layer from some reason: by requeue or
+reinsert.
+
+CRs-fixed: 473376, 473036, 471736
+Change-Id: Ie8b8208230a302d4526068531616984825f1050d
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Fix starvation tolerance values
+
+The current starvation tolerance values increase the boot time
+since high priority SW requests are delayed by regular priority requests.
+In order to overcome this, increase the starvation tolerance values.
+
+Change-Id: I9947fca9927cbd39a1d41d4bd87069df679d3103
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+Signed-off-by: Maya Erez <merez@codeaurora.org>
+
+block: urgent: Fix dispatching of URGENT mechanism
+
+There are cases when blk_peek_request is called not from blk_fetch_request
+thus the URGENT request may be started but the flag q->dispatched_urgent is
+not updated.
+
+Change-Id: I4fb588823f1b2949160cbd3907f4729767932e12
+CRs-fixed: 471736
+CRs-fixed: 473036
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: Remove "requeuing urgent req" error messages
+
+It is possible for URGENT request to be requeued/reinserted if it was
+fetched during the creation of a packed list. This end case is rare and is
+not handled at the moment.
+This patch changes the messages notifying of the above to debug level
+(instead of error) in order to clear the dmesg log.
+
+Change-Id: Ie8bc067e61559a6f702077b95c5dbcc426404232
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row-iosched idling triggered by readahead pages
+
+In the current implementation idling is triggered only by request
+insertion frequency. This heuristic is not very accurate and may hit
+random requests that shouldn't trigger idling. This patch uses the
+PG_readahead flag in struct page's flags, which indicates that the page
+is part of a readahead window, to start idling upon dispatch of a request
+associated with a readahead page.
+
+The above readehead flag is used together with the existing
+insertion-frequency trigger. The frequency timer will catch read requests
+which are not part of a readahead window, but are still part of a
+sequential stream (and therefore dispatched in small time intervals).
+
+Change-Id: Icb7145199c007408de3f267645ccb842e051fd00
+Signed-off-by: Lee Susman <lsusman@codeaurora.org>
+
+block: row: change hrtimer_cancel to hrtimer_try_to_cancel
+
+Calling hrtimer_cancel with interrupts disabled can result in a livelock.
+When flushing plug list in the block layer interrupts are disabled and an
+hrtimer is used when adding requests from that plug list to the scheduler.
+In this code flow, if the hrtimer (which is used for idling) is set, it's
+being canceled by calling hrtimer_cancel. hrtimer_cancel will perform
+the following in an endless loop:
+1. try cancel the timer
+2. if fails - rest_cpu
+the cancellation can fail if the timer function already started. Since
+interrupts are disabled it can never complete.
+This patch reduced the number of times the hrtimer lock is taken while
+interrupts are disabled by calling hrtimer_try_co_cancel. the later will
+try to cancel the timer just once and return with an error code if fails.
+
+CRs-fixed: 499887
+Change-Id: I25f79c357426d72ad67c261ce7cb503ae97dc7b9
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: Add URGENT request notification support to CFQ scheduler
+
+When the scheduler reports to the block layer that there is an urgent
+request pending, the device driver may decide to stop the transmission
+of the current request in order to handle the urgent one. This is done
+in order to reduce the latency of an urgent request. For example:
+long WRITE may be stopped to handle an urgent READ.
+
+Change-Id: I3072b8a1423870fed9c04c28d93caaf9557a7b89
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+block: row: Remove warning massage from add_request
+
+Regular priority queues is marked as "starved" if it skipped a dispatch
+due to being empty. When a new request is added to a "starved" queue
+it will be marked as urgent.
+The removed WARN_ON was warning about an impossible case when a regular
+priority (read) queue was marked as starved but wasn't empty. This is
+a possible case due to the bellow:
+If the device driver fetched a read request that is pending for
+transmission and an URGENT request arrives, the fetched read will be
+reinserted back to the scheduler. Its possible that the queue it will be
+reinserted to was marked as "starved" in the meanwhile due to being empty.
+
+CRs-fixed: 517800
+Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+
+Change-Id: I926749562b497f3c91a08e75862a0cb6293b8290
+Signed-off-by: linuxxxxx <joey@cyanogenmoditalia.it>
+---
+
+diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
+index 5905452..76e20df 100644
+--- a/block/Kconfig.iosched
++++ b/block/Kconfig.iosched
+@@ -21,6 +21,16 @@
+ 	  a new point in the service tree and doing a batch of IO from there
+ 	  in case of expiry.
+ 
++config IOSCHED_ROW
++	tristate "ROW I/O scheduler"
++	---help---
++	  The ROW I/O scheduler gives priority to READ requests over the
++	  WRITE requests when dispatching, without starving WRITE requests.
++	  Requests are kept in priority queues. Dispatching is done in a RR
++	  manner when the dispatch quantum for each queue is calculated
++	  according to queue priority.
++	  Most suitable for mobile devices.
++
+ config IOSCHED_CFQ
+ 	tristate "CFQ I/O scheduler"
+ 	# If BLK_CGROUP is a module, CFQ has to be built as module.
+@@ -75,6 +85,16 @@
+ 	config DEFAULT_DEADLINE
+ 		bool "Deadline" if IOSCHED_DEADLINE=y
+ 
++	config DEFAULT_ROW
++		bool "ROW" if IOSCHED_ROW=y
++		help
++		  The ROW I/O scheduler gives priority to READ requests
++		  over the WRITE requests when dispatching, without starving
++		  WRITE requests. Requests are kept in priority queues.
++		  Dispatching is done in a RR manner when the dispatch quantum
++		  for each queue is defined according to queue priority.
++		  Most suitable for mobile devices.
++
+ 	config DEFAULT_CFQ
+ 		bool "CFQ" if IOSCHED_CFQ=y
+ 
+@@ -89,6 +109,7 @@
+ config DEFAULT_IOSCHED
+ 	string
+ 	default "deadline" if DEFAULT_DEADLINE
++	default "row" if DEFAULT_ROW
+ 	default "cfq" if DEFAULT_CFQ
+ 	default "bfq" if DEFAULT_BFQ
+ 	default "noop" if DEFAULT_NOOP
+diff --git a/block/Makefile b/block/Makefile
+index 653d27b..d8a7f8c 100644
+--- a/block/Makefile
++++ b/block/Makefile
+@@ -15,6 +15,7 @@
+ obj-$(CONFIG_IOSCHED_DEADLINE)	+= deadline-iosched.o
+ obj-$(CONFIG_IOSCHED_CFQ)	+= cfq-iosched.o
+ obj-$(CONFIG_IOSCHED_BFQ)	+= bfq-iosched.o
++obj-$(CONFIG_IOSCHED_ROW)	+= row-iosched.o
+ 
+ obj-$(CONFIG_BLOCK_COMPAT)	+= compat_ioctl.o
+ obj-$(CONFIG_BLK_DEV_INTEGRITY)	+= blk-integrity.o
+diff --git a/block/blk-core.c b/block/blk-core.c
+index 8fc4ae2..745dc60 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -296,13 +296,26 @@
+  * Description:
+  *    See @blk_run_queue. This variant must be called with the queue lock
+  *    held and interrupts disabled.
++ *    Device driver will be notified of an urgent request
++ *    pending under the following conditions:
++ *    1. The driver and the current scheduler support urgent reques handling
++ *    2. There is an urgent request pending in the scheduler
++ *    3. There isn't already an urgent request in flight, meaning previously
++ *       notified urgent request completed (!q->notified_urgent)
+  */
+ void __blk_run_queue(struct request_queue *q)
+ {
+ 	if (unlikely(blk_queue_stopped(q)))
+ 		return;
+ 
+-	q->request_fn(q);
++	if (!q->notified_urgent &&
++		q->elevator->elevator_type->ops.elevator_is_urgent_fn &&
++		q->urgent_request_fn &&
++		q->elevator->elevator_type->ops.elevator_is_urgent_fn(q)) {
++		q->notified_urgent = true;
++		q->urgent_request_fn(q);
++	} else
++		q->request_fn(q);
+ }
+ EXPORT_SYMBOL(__blk_run_queue);
+ 
+@@ -928,6 +941,50 @@
+ 	elv_requeue_request(q, rq);
+ }
+ EXPORT_SYMBOL(blk_requeue_request);
++
++/**
++ * blk_reinsert_request() - Insert a request back to the scheduler
++ * @q:		request queue
++ * @rq:		request to be inserted
++ *
++ * This function inserts the request back to the scheduler as if
++ * it was never dispatched.
++ *
++ * Return: 0 on success, error code on fail
++ */
++int blk_reinsert_request(struct request_queue *q, struct request *rq)
++{
++	if (unlikely(!rq) || unlikely(!q))
++		return -EIO;
++
++	blk_delete_timer(rq);
++	blk_clear_rq_complete(rq);
++	trace_block_rq_requeue(q, rq);
++
++	if (blk_rq_tagged(rq))
++		blk_queue_end_tag(q, rq);
++
++	BUG_ON(blk_queued_rq(rq));
++
++	return elv_reinsert_request(q, rq);
++}
++EXPORT_SYMBOL(blk_reinsert_request);
++
++/**
++ * blk_reinsert_req_sup() - check whether the scheduler supports
++ *          reinsertion of requests
++ * @q:		request queue
++ *
++ * Returns true if the current scheduler supports reinserting
++ * request. False otherwise
++ */
++bool blk_reinsert_req_sup(struct request_queue *q)
++{
++	if (unlikely(!q))
++		return false;
++	return q->elevator->elevator_type->ops.elevator_reinsert_req_fn ? true : false;
++}
++EXPORT_SYMBOL(blk_reinsert_req_sup);
+ 
+ static void add_acct_request(struct request_queue *q, struct request *rq,
+ 			     int where)
+@@ -1979,8 +2036,17 @@
+ 	struct request *rq;
+ 
+ 	rq = blk_peek_request(q);
+-	if (rq)
++	if (rq) {
++		/*
++		 * Assumption: the next request fetched from scheduler after we
++		 * notified "urgent request pending" - will be the urgent one
++		 */
++		if (q->notified_urgent && !q->dispatched_urgent) {
++			q->dispatched_urgent = true;
++			(void)blk_mark_rq_urgent(rq);
++		}
+ 		blk_start_request(rq);
++	}
+ 	return rq;
+ }
+ EXPORT_SYMBOL(blk_fetch_request);
+diff --git a/block/blk-settings.c b/block/blk-settings.c
+index fa1eb04..7d3ee7f 100644
+--- a/block/blk-settings.c
++++ b/block/blk-settings.c
+@@ -100,6 +100,18 @@
+ EXPORT_SYMBOL_GPL(blk_queue_lld_busy);
+ 
+ /**
++ * blk_urgent_request() - Set an urgent_request handler function for queue
++ * @q:		queue
++ * @fn:		handler for urgent requests
++ *
++ */
++void blk_urgent_request(struct request_queue *q, request_fn_proc *fn)
++{
++	q->urgent_request_fn = fn;
++}
++EXPORT_SYMBOL(blk_urgent_request);
++
++/**
+  * blk_set_default_limits - reset limits to default values
+  * @lim:  the queue_limits structure to reset
+  *
+diff --git a/block/blk.h b/block/blk.h
+index 20b900a..7837cec 100644
+--- a/block/blk.h
++++ b/block/blk.h
+@@ -30,6 +30,7 @@
+  */
+ enum rq_atomic_flags {
+ 	REQ_ATOM_COMPLETE = 0,
++	REQ_ATOM_URGENT = 1,
+ };
+ 
+ /*
+@@ -46,6 +47,16 @@
+ 	clear_bit(REQ_ATOM_COMPLETE, &rq->atomic_flags);
+ }
+ 
++static inline int blk_mark_rq_urgent(struct request *rq)
++{
++	return test_and_set_bit(REQ_ATOM_URGENT, &rq->atomic_flags);
++}
++
++static inline void blk_clear_rq_urgent(struct request *rq)
++{
++	clear_bit(REQ_ATOM_URGENT, &rq->atomic_flags);
++}
++
+ /*
+  * Internal elevator interface
+  */
+diff --git a/block/elevator.c b/block/elevator.c
+index a3b64bc..f7ef97a 100644
+--- a/block/elevator.c
++++ b/block/elevator.c
+@@ -603,6 +603,41 @@
+ 	__elv_add_request(q, rq, ELEVATOR_INSERT_REQUEUE);
+ }
+ 
++/**
++ * elv_reinsert_request() - Insert a request back to the scheduler
++ * @q:		request queue where request should be inserted
++ * @rq:		request to be inserted
++ *
++ * This function returns the request back to the scheduler to be
++ * inserted as if it was never dispatched
++ *
++ * Return: 0 on success, error code on failure
++ */
++int elv_reinsert_request(struct request_queue *q, struct request *rq)
++{
++	int res;
++
++	if (!q->elevator->elevator_type->ops.elevator_reinsert_req_fn)
++		return -EPERM;
++
++	res = q->elevator->elevator_type->ops.elevator_reinsert_req_fn(q, rq);
++	if (!res) {
++		/*
++		 * it already went through dequeue, we need to decrement the
++		 * in_flight count again
++		 */
++		if (blk_account_rq(rq)) {
++			q->in_flight[rq_is_sync(rq)]--;
++			if (rq->cmd_flags & REQ_SORTED)
++				elv_deactivate_rq(q, rq);
++		}
++		rq->cmd_flags &= ~REQ_STARTED;
++		q->nr_sorted++;
++	}
++
++	return res;
++}
++
+ void elv_drain_elevator(struct request_queue *q)
+ {
+ 	static int printed;
+@@ -807,6 +842,11 @@
+ {
+ 	struct elevator_queue *e = q->elevator;
+ 
++	if (test_bit(REQ_ATOM_URGENT, &rq->atomic_flags)) {
++		q->notified_urgent = false;
++		q->dispatched_urgent = false;
++		blk_clear_rq_urgent(rq);
++	}
+ 	/*
+ 	 * request is released from the driver, io must be done
+ 	 */
+diff --git a/block/row-iosched.c b/block/row-iosched.c
+new file mode 100644
+index 0000000..0c949d8
+--- /dev/null
++++ b/block/row-iosched.c
+@@ -0,0 +1,767 @@
++/*
++ * ROW (Read Over Write) I/O scheduler.
++ *
++ * Copyright (c) 2012, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++/* See Documentation/block/row-iosched.txt */
++
++#include <linux/kernel.h>
++#include <linux/fs.h>
++#include <linux/blkdev.h>
++#include <linux/elevator.h>
++#include <linux/bio.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/init.h>
++#include <linux/compiler.h>
++#include <linux/blktrace_api.h>
++#include <linux/jiffies.h>
++
++/*
++ * enum row_queue_prio - Priorities of the ROW queues
++ *
++ * This enum defines the priorities (and the number of queues)
++ * the requests will be disptributed to. The higher priority -
++ * the bigger is the dispatch quantum given to that queue.
++ * ROWQ_PRIO_HIGH_READ - is the higher priority queue.
++ *
++ */
++enum row_queue_prio {
++	ROWQ_PRIO_HIGH_READ = 0,
++	ROWQ_PRIO_REG_READ,
++	ROWQ_PRIO_HIGH_SWRITE,
++	ROWQ_PRIO_REG_SWRITE,
++	ROWQ_PRIO_REG_WRITE,
++	ROWQ_PRIO_LOW_READ,
++	ROWQ_PRIO_LOW_SWRITE,
++	ROWQ_MAX_PRIO,
++};
++
++/* Flags indicating whether idling is enabled on the queue */
++static const bool queue_idling_enabled[] = {
++	true,	/* ROWQ_PRIO_HIGH_READ */
++	true,	/* ROWQ_PRIO_REG_READ */
++	false,	/* ROWQ_PRIO_HIGH_SWRITE */
++	false,	/* ROWQ_PRIO_REG_SWRITE */
++	false,	/* ROWQ_PRIO_REG_WRITE */
++	false,	/* ROWQ_PRIO_LOW_READ */
++	false,	/* ROWQ_PRIO_LOW_SWRITE */
++};
++
++/* Flags indicating whether the queue can notify on urgent requests */
++static const bool urgent_queues[] = {
++	true,	/* ROWQ_PRIO_HIGH_READ */
++	true,	/* ROWQ_PRIO_REG_READ */
++	false,	/* ROWQ_PRIO_HIGH_SWRITE */
++	false,	/* ROWQ_PRIO_REG_SWRITE */
++	false,	/* ROWQ_PRIO_REG_WRITE */
++	false,	/* ROWQ_PRIO_LOW_READ */
++	false,	/* ROWQ_PRIO_LOW_SWRITE */
++};
++
++/* Default values for row queues quantums in each dispatch cycle */
++static const int queue_quantum[] = {
++	100,	/* ROWQ_PRIO_HIGH_READ */
++	100,	/* ROWQ_PRIO_REG_READ */
++	2,	/* ROWQ_PRIO_HIGH_SWRITE */
++	1,	/* ROWQ_PRIO_REG_SWRITE */
++	1,	/* ROWQ_PRIO_REG_WRITE */
++	1,	/* ROWQ_PRIO_LOW_READ */
++	1	/* ROWQ_PRIO_LOW_SWRITE */
++};
++
++/* Default values for idling on read queues */
++#define ROW_IDLE_TIME_MSEC 5	/* msec */
++#define ROW_READ_FREQ_MSEC 20	/* msec */
++
++/**
++ * struct rowq_idling_data -  parameters for idling on the queue
++ * @last_insert_time:	time the last request was inserted
++ *			to the queue
++ * @begin_idling:	flag indicating wether we should idle
++ *
++ */
++struct rowq_idling_data {
++	ktime_t			last_insert_time;
++	bool			begin_idling;
++};
++
++/**
++ * struct row_queue - requests grouping structure
++ * @rdata:		parent row_data structure
++ * @fifo:		fifo of requests
++ * @prio:		queue priority (enum row_queue_prio)
++ * @nr_dispatched:	number of requests already dispatched in
++ *			the current dispatch cycle
++ * @slice:		number of requests to dispatch in a cycle
++ * @idle_data:		data for idling on queues
++ *
++ */
++struct row_queue {
++	struct row_data		*rdata;
++	struct list_head	fifo;
++	enum row_queue_prio	prio;
++
++	unsigned int		nr_dispatched;
++	unsigned int		slice;
++
++	/* used only for READ queues */
++	struct rowq_idling_data	idle_data;
++};
++
++/**
++ * struct idling_data - data for idling on empty rqueue
++ * @idle_time:		idling duration (jiffies)
++ * @freq:		min time between two requests that
++ *			triger idling (msec)
++ * @idle_work:		pointer to struct delayed_work
++ *
++ */
++struct idling_data {
++	unsigned long			idle_time;
++	u32				freq;
++
++	struct workqueue_struct	*idle_workqueue;
++	struct delayed_work		idle_work;
++};
++
++/**
++ * struct row_queue - Per block device rqueue structure
++ * @dispatch_queue:	dispatch rqueue
++ * @row_queues:		array of priority request queues with
++ *			dispatch quantum per rqueue
++ * @curr_queue:		index in the row_queues array of the
++ *			currently serviced rqueue
++ * @read_idle:		data for idling after READ request
++ * @nr_reqs: nr_reqs[0] holds the number of all READ requests in
++ *			scheduler, nr_reqs[1] holds the number of all WRITE
++ *			requests in scheduler
++ * @cycle_flags:	used for marking unserved queueus
++ *
++ */
++struct row_data {
++	struct request_queue		*dispatch_queue;
++
++	struct {
++		struct row_queue	rqueue;
++		int			disp_quantum;
++	} row_queues[ROWQ_MAX_PRIO];
++
++	enum row_queue_prio		curr_queue;
++
++	struct idling_data		read_idle;
++	unsigned int			nr_reqs[2];
++
++	unsigned int			cycle_flags;
++};
++
++#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elevator_private[0]))
++
++#define row_log(q, fmt, args...)   \
++	blk_add_trace_msg(q, "%s():" fmt , __func__, ##args)
++#define row_log_rowq(rdata, rowq_id, fmt, args...)		\
++	blk_add_trace_msg(rdata->dispatch_queue, "rowq%d " fmt, \
++		rowq_id, ##args)
++
++static inline void row_mark_rowq_unserved(struct row_data *rd,
++					 enum row_queue_prio qnum)
++{
++	rd->cycle_flags |= (1 << qnum);
++}
++
++static inline void row_clear_rowq_unserved(struct row_data *rd,
++					  enum row_queue_prio qnum)
++{
++	rd->cycle_flags &= ~(1 << qnum);
++}
++
++static inline int row_rowq_unserved(struct row_data *rd,
++				   enum row_queue_prio qnum)
++{
++	return rd->cycle_flags & (1 << qnum);
++}
++
++/******************** Static helper functions ***********************/
++/*
++ * kick_queue() - Wake up device driver queue thread
++ * @work:	pointer to struct work_struct
++ *
++ * This is a idling delayed work function. It's purpose is to wake up the
++ * device driver in order for it to start fetching requests.
++ *
++ */
++static void kick_queue(struct work_struct *work)
++{
++	struct delayed_work *idle_work = to_delayed_work(work);
++	struct idling_data *read_data =
++		container_of(idle_work, struct idling_data, idle_work);
++	struct row_data *rd =
++		container_of(read_data, struct row_data, read_idle);
++
++	row_log_rowq(rd, rd->curr_queue, "Performing delayed work");
++	/* Mark idling process as done */
++	rd->row_queues[rd->curr_queue].rqueue.idle_data.begin_idling = false;
++
++	if (!(rd->nr_reqs[0] + rd->nr_reqs[1]))
++		row_log(rd->dispatch_queue, "No requests in scheduler");
++	else {
++		spin_lock_irq(rd->dispatch_queue->queue_lock);
++		__blk_run_queue(rd->dispatch_queue);
++		spin_unlock_irq(rd->dispatch_queue->queue_lock);
++	}
++}
++
++/*
++ * row_restart_disp_cycle() - Restart the dispatch cycle
++ * @rd:	pointer to struct row_data
++ *
++ * This function restarts the dispatch cycle by:
++ * - Setting current queue to ROWQ_PRIO_HIGH_READ
++ * - For each queue: reset the number of requests dispatched in
++ *   the cycle
++ */
++static inline void row_restart_disp_cycle(struct row_data *rd)
++{
++	int i;
++
++	for (i = 0; i < ROWQ_MAX_PRIO; i++)
++		rd->row_queues[i].rqueue.nr_dispatched = 0;
++
++	rd->curr_queue = ROWQ_PRIO_HIGH_READ;
++	row_log(rd->dispatch_queue, "Restarting cycle");
++}
++
++static inline void row_get_next_queue(struct row_data *rd)
++{
++	rd->curr_queue++;
++	if (rd->curr_queue == ROWQ_MAX_PRIO)
++		row_restart_disp_cycle(rd);
++}
++
++/******************* Elevator callback functions *********************/
++
++/*
++ * row_add_request() - Add request to the scheduler
++ * @q:	requests queue
++ * @rq:	request to add
++ *
++ */
++static void row_add_request(struct request_queue *q,
++			    struct request *rq)
++{
++	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
++	struct row_queue *rqueue = RQ_ROWQ(rq);
++
++	list_add_tail(&rq->queuelist, &rqueue->fifo);
++	rd->nr_reqs[rq_data_dir(rq)]++;
++	rq_set_fifo_time(rq, jiffies); /* for statistics*/
++
++	if (queue_idling_enabled[rqueue->prio]) {
++		if (delayed_work_pending(&rd->read_idle.idle_work))
++			(void)cancel_delayed_work(
++				&rd->read_idle.idle_work);
++		if (ktime_to_ms(ktime_sub(ktime_get(),
++				rqueue->idle_data.last_insert_time)) <
++				rd->read_idle.freq) {
++			rqueue->idle_data.begin_idling = true;
++			row_log_rowq(rd, rqueue->prio, "Enable idling");
++		} else {
++			rqueue->idle_data.begin_idling = false;
++			row_log_rowq(rd, rqueue->prio, "Disable idling");
++		}
++
++		rqueue->idle_data.last_insert_time = ktime_get();
++	}
++	if (urgent_queues[rqueue->prio] &&
++	    row_rowq_unserved(rd, rqueue->prio)) {
++		row_log_rowq(rd, rqueue->prio,
++			     "added urgent req curr_queue = %d",
++			     rd->curr_queue);
++	} else
++		row_log_rowq(rd, rqueue->prio, "added request");
++}
++
++/**
++ * row_reinsert_req() - Reinsert request back to the scheduler
++ * @q:	requests queue
++ * @rq:	request to add
++ *
++ * Reinsert the given request back to the queue it was
++ * dispatched from as if it was never dispatched.
++ *
++ * Returns 0 on success, error code otherwise
++ */
++static int row_reinsert_req(struct request_queue *q,
++			    struct request *rq)
++{
++	struct row_data    *rd = q->elevator->elevator_data;
++	struct row_queue   *rqueue = RQ_ROWQ(rq);
++
++	/* Verify rqueue is legitimate */
++	if (rqueue->prio >= ROWQ_MAX_PRIO) {
++		pr_err("\n\nROW BUG: row_reinsert_req() rqueue->prio = %d\n",
++			   rqueue->prio);
++		blk_dump_rq_flags(rq, "");
++		return -EIO;
++	}
++
++	list_add(&rq->queuelist, &rqueue->fifo);
++	rd->nr_reqs[rq_data_dir(rq)]++;
++
++	row_log_rowq(rd, rqueue->prio, "request reinserted");
++
++	return 0;
++}
++
++/**
++ * row_urgent_pending() - Return TRUE if there is an urgent
++ *			  request on scheduler
++ * @q:	requests queue
++ */
++static bool row_urgent_pending(struct request_queue *q)
++{
++	struct row_data *rd = q->elevator->elevator_data;
++	int i;
++
++	for (i = 0; i < ROWQ_MAX_PRIO; i++)
++		if (urgent_queues[i] && row_rowq_unserved(rd, i) &&
++		    !list_empty(&rd->row_queues[i].rqueue.fifo)) {
++			row_log_rowq(rd, i,
++				     "Urgent request pending (curr=%i)",
++				     rd->curr_queue);
++			return true;
++		}
++
++	return false;
++}
++
++/**
++ * row_remove_request() -  Remove given request from scheduler
++ * @q:	requests queue
++ * @rq:	request to remove
++ *
++ */
++static void row_remove_request(struct request_queue *q,
++			       struct request *rq)
++{
++	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
++
++	rq_fifo_clear(rq);
++	rd->nr_reqs[rq_data_dir(rq)]--;
++}
++
++/*
++ * row_dispatch_insert() - move request to dispatch queue
++ * @rd:	pointer to struct row_data
++ *
++ * This function moves the next request to dispatch from
++ * rd->curr_queue to the dispatch queue
++ *
++ */
++static void row_dispatch_insert(struct row_data *rd)
++{
++	struct request *rq;
++
++	rq = rq_entry_fifo(rd->row_queues[rd->curr_queue].rqueue.fifo.next);
++	row_remove_request(rd->dispatch_queue, rq);
++	elv_dispatch_add_tail(rd->dispatch_queue, rq);
++	rd->row_queues[rd->curr_queue].rqueue.nr_dispatched++;
++	row_clear_rowq_unserved(rd, rd->curr_queue);
++	row_log_rowq(rd, rd->curr_queue, " Dispatched request nr_disp = %d",
++		     rd->row_queues[rd->curr_queue].rqueue.nr_dispatched);
++}
++
++/*
++ * row_choose_queue() -  choose the next queue to dispatch from
++ * @rd:	pointer to struct row_data
++ *
++ * Updates rd->curr_queue. Returns 1 if there are requests to
++ * dispatch, 0 if there are no requests in scheduler
++ *
++ */
++static int row_choose_queue(struct row_data *rd)
++{
++	int prev_curr_queue = rd->curr_queue;
++
++	if (!(rd->nr_reqs[0] + rd->nr_reqs[1])) {
++		row_log(rd->dispatch_queue, "No more requests in scheduler");
++		return 0;
++	}
++
++	row_get_next_queue(rd);
++
++	/*
++	 * Loop over all queues to find the next queue that is not empty.
++	 * Stop when you get back to curr_queue
++	 */
++	while (list_empty(&rd->row_queues[rd->curr_queue].rqueue.fifo)
++	       && rd->curr_queue != prev_curr_queue) {
++		/* Mark rqueue as unserved */
++		row_mark_rowq_unserved(rd, rd->curr_queue);
++		row_get_next_queue(rd);
++	}
++
++	return 1;
++}
++
++/*
++ * row_dispatch_requests() - selects the next request to dispatch
++ * @q:		requests queue
++ * @force:	ignored
++ *
++ * Return 0 if no requests were moved to the dispatch queue.
++ *	  1 otherwise
++ *
++ */
++static int row_dispatch_requests(struct request_queue *q, int force)
++{
++	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
++	int ret = 0, currq, i;
++
++	currq = rd->curr_queue;
++
++	/*
++	 * Find the first unserved queue (with higher priority then currq)
++	 * that is not empty
++	 */
++	for (i = 0; i < currq; i++) {
++		if (row_rowq_unserved(rd, i) &&
++		    !list_empty(&rd->row_queues[i].rqueue.fifo)) {
++			row_log_rowq(rd, currq,
++				" Preemting for unserved rowq%d", i);
++			rd->curr_queue = i;
++			row_dispatch_insert(rd);
++			ret = 1;
++			goto done;
++		}
++	}
++
++	if (rd->row_queues[currq].rqueue.nr_dispatched >=
++	    rd->row_queues[currq].disp_quantum) {
++		rd->row_queues[currq].rqueue.nr_dispatched = 0;
++		row_log_rowq(rd, currq, "Expiring rqueue");
++		ret = row_choose_queue(rd);
++		if (ret)
++			row_dispatch_insert(rd);
++		goto done;
++	}
++
++	/* Dispatch from curr_queue */
++	if (list_empty(&rd->row_queues[currq].rqueue.fifo)) {
++		/* check idling */
++		if (delayed_work_pending(&rd->read_idle.idle_work)) {
++			if (force) {
++				(void)cancel_delayed_work(
++				&rd->read_idle.idle_work);
++				row_log_rowq(rd, currq,
++					"Canceled delayed work - forced dispatch");
++			} else {
++				row_log_rowq(rd, currq,
++						 "Delayed work pending. Exiting");
++				goto done;
++			}
++		}
++
++		if (!force && queue_idling_enabled[currq] &&
++		    rd->row_queues[currq].rqueue.idle_data.begin_idling) {
++			if (!queue_delayed_work(rd->read_idle.idle_workqueue,
++						&rd->read_idle.idle_work,
++						rd->read_idle.idle_time)) {
++				row_log_rowq(rd, currq,
++					     "Work already on queue!");
++				pr_err("ROW_BUG: Work already on queue!");
++			} else
++				row_log_rowq(rd, currq,
++				     "Scheduled delayed work. exiting");
++			goto done;
++		} else {
++			row_log_rowq(rd, currq,
++				     "Currq empty. Choose next queue");
++			ret = row_choose_queue(rd);
++			if (!ret)
++				goto done;
++		}
++	}
++
++	ret = 1;
++	row_dispatch_insert(rd);
++
++done:
++	return ret;
++}
++
++/*
++ * row_init_queue() - Init scheduler data structures
++ * @q:	requests queue
++ *
++ * Return pointer to struct row_data to be saved in elevator for
++ * this dispatch queue
++ *
++ */
++static void *row_init_queue(struct request_queue *q)
++{
++
++	struct row_data *rdata;
++	int i;
++
++	rdata = kmalloc_node(sizeof(*rdata),
++			     GFP_KERNEL | __GFP_ZERO, q->node);
++	if (!rdata)
++		return NULL;
++
++	for (i = 0; i < ROWQ_MAX_PRIO; i++) {
++		INIT_LIST_HEAD(&rdata->row_queues[i].rqueue.fifo);
++		rdata->row_queues[i].disp_quantum = queue_quantum[i];
++		rdata->row_queues[i].rqueue.rdata = rdata;
++		rdata->row_queues[i].rqueue.prio = i;
++		rdata->row_queues[i].rqueue.idle_data.begin_idling = false;
++		rdata->row_queues[i].rqueue.idle_data.last_insert_time =
++			ktime_set(0, 0);
++	}
++
++	/*
++	 * Currently idling is enabled only for READ queues. If we want to
++	 * enable it for write queues also, note that idling frequency will
++	 * be the same in both cases
++	 */
++	rdata->read_idle.idle_time = msecs_to_jiffies(ROW_IDLE_TIME_MSEC);
++	/* Maybe 0 on some platforms */
++	if (!rdata->read_idle.idle_time)
++		rdata->read_idle.idle_time = 1;
++	rdata->read_idle.freq = ROW_READ_FREQ_MSEC;
++	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work",
++					    WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
++	if (!rdata->read_idle.idle_workqueue)
++		panic("Failed to create idle workqueue\n");
++	INIT_DELAYED_WORK(&rdata->read_idle.idle_work, kick_queue);
++
++	rdata->curr_queue = ROWQ_PRIO_HIGH_READ;
++	rdata->dispatch_queue = q;
++
++	rdata->nr_reqs[READ] = rdata->nr_reqs[WRITE] = 0;
++
++	return rdata;
++}
++
++/*
++ * row_exit_queue() - called on unloading the RAW scheduler
++ * @e:	poiner to struct elevator_queue
++ *
++ */
++static void row_exit_queue(struct elevator_queue *e)
++{
++	struct row_data *rd = (struct row_data *)e->elevator_data;
++	int i;
++
++	for (i = 0; i < ROWQ_MAX_PRIO; i++)
++		BUG_ON(!list_empty(&rd->row_queues[i].rqueue.fifo));
++	(void)cancel_delayed_work_sync(&rd->read_idle.idle_work);
++	BUG_ON(delayed_work_pending(&rd->read_idle.idle_work));
++	destroy_workqueue(rd->read_idle.idle_workqueue);
++	kfree(rd);
++}
++
++/*
++ * row_merged_requests() - Called when 2 requests are merged
++ * @q:		requests queue
++ * @rq:		request the two requests were merged into
++ * @next:	request that was merged
++ */
++static void row_merged_requests(struct request_queue *q, struct request *rq,
++				 struct request *next)
++{
++	struct row_queue   *rqueue = RQ_ROWQ(next);
++
++	list_del_init(&next->queuelist);
++
++	rqueue->rdata->nr_reqs[rq_data_dir(rq)]--;
++}
++
++/*
++ * get_queue_type() - Get queue type for a given request
++ *
++ * This is a helping function which purpose is to determine what
++ * ROW queue the given request should be added to (and
++ * dispatched from leter on)
++ *
++ * TODO: Right now only 3 queues are used REG_READ, REG_WRITE
++ * and REG_SWRITE
++ */
++static enum row_queue_prio get_queue_type(struct request *rq)
++{
++	const int data_dir = rq_data_dir(rq);
++	const bool is_sync = rq_is_sync(rq);
++
++	if (data_dir == READ)
++		return ROWQ_PRIO_REG_READ;
++	else if (is_sync)
++		return ROWQ_PRIO_REG_SWRITE;
++	else
++		return ROWQ_PRIO_REG_WRITE;
++}
++
++/*
++ * row_set_request() - Set ROW data structures associated with this request.
++ * @q:		requests queue
++ * @rq:		pointer to the request
++ * @gfp_mask:	ignored
++ *
++ */
++static int
++row_set_request(struct request_queue *q, struct request *rq, gfp_t gfp_mask)
++{
++	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
++	unsigned long flags;
++
++	spin_lock_irqsave(q->queue_lock, flags);
++	rq->elevator_private[0] =
++		(void *)(&rd->row_queues[get_queue_type(rq)]);
++	spin_unlock_irqrestore(q->queue_lock, flags);
++
++	return 0;
++}
++
++/********** Helping sysfs functions/defenitions for ROW attributes ******/
++static ssize_t row_var_show(int var, char *page)
++{
++	return snprintf(page, 100, "%d\n", var);
++}
++
++static ssize_t row_var_store(int *var, const char *page, size_t count)
++{
++	int err;
++	err = kstrtoul(page, 10, (unsigned long *)var);
++
++	return count;
++}
++
++#define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
++static ssize_t __FUNC(struct elevator_queue *e, char *page)		\
++{									\
++	struct row_data *rowd = e->elevator_data;			\
++	int __data = __VAR;						\
++	if (__CONV)							\
++		__data = jiffies_to_msecs(__data);			\
++	return row_var_show(__data, (page));			\
++}
++SHOW_FUNCTION(row_hp_read_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_HIGH_READ].disp_quantum, 0);
++SHOW_FUNCTION(row_rp_read_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_REG_READ].disp_quantum, 0);
++SHOW_FUNCTION(row_hp_swrite_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_HIGH_SWRITE].disp_quantum, 0);
++SHOW_FUNCTION(row_rp_swrite_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_REG_SWRITE].disp_quantum, 0);
++SHOW_FUNCTION(row_rp_write_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_REG_WRITE].disp_quantum, 0);
++SHOW_FUNCTION(row_lp_read_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_LOW_READ].disp_quantum, 0);
++SHOW_FUNCTION(row_lp_swrite_quantum_show,
++	rowd->row_queues[ROWQ_PRIO_LOW_SWRITE].disp_quantum, 0);
++SHOW_FUNCTION(row_read_idle_show, rowd->read_idle.idle_time, 1);
++SHOW_FUNCTION(row_read_idle_freq_show, rowd->read_idle.freq, 0);
++#undef SHOW_FUNCTION
++
++#define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
++static ssize_t __FUNC(struct elevator_queue *e,				\
++		const char *page, size_t count)				\
++{									\
++	struct row_data *rowd = e->elevator_data;			\
++	int __data;						\
++	int ret = row_var_store(&__data, (page), count);		\
++	if (__CONV)							\
++		__data = (int)msecs_to_jiffies(__data);			\
++	if (__data < (MIN))						\
++		__data = (MIN);						\
++	else if (__data > (MAX))					\
++		__data = (MAX);						\
++	*(__PTR) = __data;						\
++	return ret;							\
++}
++STORE_FUNCTION(row_hp_read_quantum_store,
++&rowd->row_queues[ROWQ_PRIO_HIGH_READ].disp_quantum, 1, INT_MAX, 0);
++STORE_FUNCTION(row_rp_read_quantum_store,
++			&rowd->row_queues[ROWQ_PRIO_REG_READ].disp_quantum,
++			1, INT_MAX, 0);
++STORE_FUNCTION(row_hp_swrite_quantum_store,
++			&rowd->row_queues[ROWQ_PRIO_HIGH_SWRITE].disp_quantum,
++			1, INT_MAX, 0);
++STORE_FUNCTION(row_rp_swrite_quantum_store,
++			&rowd->row_queues[ROWQ_PRIO_REG_SWRITE].disp_quantum,
++			1, INT_MAX, 0);
++STORE_FUNCTION(row_rp_write_quantum_store,
++			&rowd->row_queues[ROWQ_PRIO_REG_WRITE].disp_quantum,
++			1, INT_MAX, 0);
++STORE_FUNCTION(row_lp_read_quantum_store,
++			&rowd->row_queues[ROWQ_PRIO_LOW_READ].disp_quantum,
++			1, INT_MAX, 0);
++STORE_FUNCTION(row_lp_swrite_quantum_store,
++			&rowd->row_queues[ROWQ_PRIO_LOW_SWRITE].disp_quantum,
++			1, INT_MAX, 1);
++STORE_FUNCTION(row_read_idle_store, &rowd->read_idle.idle_time, 1, INT_MAX, 1);
++STORE_FUNCTION(row_read_idle_freq_store, &rowd->read_idle.freq, 1, INT_MAX, 0);
++
++#undef STORE_FUNCTION
++
++#define ROW_ATTR(name) \
++	__ATTR(name, S_IRUGO|S_IWUSR, row_##name##_show, \
++				      row_##name##_store)
++
++static struct elv_fs_entry row_attrs[] = {
++	ROW_ATTR(hp_read_quantum),
++	ROW_ATTR(rp_read_quantum),
++	ROW_ATTR(hp_swrite_quantum),
++	ROW_ATTR(rp_swrite_quantum),
++	ROW_ATTR(rp_write_quantum),
++	ROW_ATTR(lp_read_quantum),
++	ROW_ATTR(lp_swrite_quantum),
++	ROW_ATTR(read_idle),
++	ROW_ATTR(read_idle_freq),
++	__ATTR_NULL
++};
++
++static struct elevator_type iosched_row = {
++	.ops = {
++		.elevator_merge_req_fn		= row_merged_requests,
++		.elevator_dispatch_fn		= row_dispatch_requests,
++		.elevator_add_req_fn		= row_add_request,
++		.elevator_reinsert_req_fn	= row_reinsert_req,
++		.elevator_is_urgent_fn		= row_urgent_pending,
++		.elevator_former_req_fn		= elv_rb_former_request,
++		.elevator_latter_req_fn		= elv_rb_latter_request,
++		.elevator_set_req_fn		= row_set_request,
++		.elevator_init_fn		= row_init_queue,
++		.elevator_exit_fn		= row_exit_queue,
++	},
++
++	.elevator_attrs = row_attrs,
++	.elevator_name = "row",
++	.elevator_owner = THIS_MODULE,
++};
++
++static int __init row_init(void)
++{
++	elv_register(&iosched_row);
++	return 0;
++}
++
++static void __exit row_exit(void)
++{
++	elv_unregister(&iosched_row);
++}
++
++module_init(row_init);
++module_exit(row_exit);
++
++MODULE_LICENSE("GPLv2");
++MODULE_DESCRIPTION("Read Over Write IO scheduler");
+\ No newline at end of file
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index 5e30b45..94d1b95 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -277,6 +277,7 @@
+ 	struct request_list	rq;
+ 
+ 	request_fn_proc		*request_fn;
++	request_fn_proc		*urgent_request_fn;
+ 	make_request_fn		*make_request_fn;
+ 	prep_rq_fn		*prep_rq_fn;
+ 	unprep_rq_fn		*unprep_rq_fn;
+@@ -352,6 +353,8 @@
+ 	struct list_head	timeout_list;
+ 
+ 	struct queue_limits	limits;
++	bool			notified_urgent;
++	bool			dispatched_urgent;
+ 
+ 	/*
+ 	 * sg stuff
+@@ -662,6 +665,8 @@
+ 					gfp_t);
+ extern void blk_insert_request(struct request_queue *, struct request *, int, void *);
+ extern void blk_requeue_request(struct request_queue *, struct request *);
++extern int blk_reinsert_request(struct request_queue *q, struct request *rq);
++extern bool blk_reinsert_req_sup(struct request_queue *q);
+ extern void blk_add_request_payload(struct request *rq, struct page *page,
+ 		unsigned int len);
+ extern int blk_rq_check_limits(struct request_queue *q, struct request *rq);
+@@ -806,6 +811,7 @@
+ extern struct request_queue *blk_init_queue(request_fn_proc *, spinlock_t *);
+ extern struct request_queue *blk_init_allocated_queue(struct request_queue *,
+ 						      request_fn_proc *, spinlock_t *);
++extern void blk_urgent_request(struct request_queue *q, request_fn_proc *fn);
+ extern void blk_cleanup_queue(struct request_queue *);
+ extern void blk_queue_make_request(struct request_queue *, make_request_fn *);
+ extern void blk_queue_bounce_limit(struct request_queue *, u64);
+diff --git a/include/linux/elevator.h b/include/linux/elevator.h
+index d800d51..aed197f 100644
+--- a/include/linux/elevator.h
++++ b/include/linux/elevator.h
+@@ -5,6 +5,8 @@
+ 
+ #ifdef CONFIG_BLOCK
+ 
++struct io_cq;
++
+ typedef int (elevator_merge_fn) (struct request_queue *, struct request **,
+ 				 struct bio *);
+ 
+@@ -20,10 +22,16 @@
+ typedef int (elevator_dispatch_fn) (struct request_queue *, int);
+ 
+ typedef void (elevator_add_req_fn) (struct request_queue *, struct request *);
++typedef int (elevator_queue_empty_fn) (struct request_queue *);
++typedef int (elevator_reinsert_req_fn) (struct request_queue *,
++					struct request *);
++typedef bool (elevator_is_urgent_fn) (struct request_queue *);
+ typedef struct request *(elevator_request_list_fn) (struct request_queue *, struct request *);
+ typedef void (elevator_completed_req_fn) (struct request_queue *, struct request *);
+ typedef int (elevator_may_queue_fn) (struct request_queue *, int);
+ 
++typedef void (elevator_init_icq_fn) (struct io_cq *);
++typedef void (elevator_exit_icq_fn) (struct io_cq *);
+ typedef int (elevator_set_req_fn) (struct request_queue *, struct request *, gfp_t);
+ typedef void (elevator_put_req_fn) (struct request *);
+ typedef void (elevator_activate_req_fn) (struct request_queue *, struct request *);
+@@ -42,13 +50,20 @@
+ 
+ 	elevator_dispatch_fn *elevator_dispatch_fn;
+ 	elevator_add_req_fn *elevator_add_req_fn;
++	elevator_reinsert_req_fn *elevator_reinsert_req_fn;
++	elevator_is_urgent_fn *elevator_is_urgent_fn;
++
+ 	elevator_activate_req_fn *elevator_activate_req_fn;
+ 	elevator_deactivate_req_fn *elevator_deactivate_req_fn;
+ 
++	elevator_queue_empty_fn *elevator_queue_empty_fn;
+ 	elevator_completed_req_fn *elevator_completed_req_fn;
+ 
+ 	elevator_request_list_fn *elevator_former_req_fn;
+ 	elevator_request_list_fn *elevator_latter_req_fn;
++
++	elevator_init_icq_fn *elevator_init_icq_fn;	/* see iocontext.h */
++	elevator_exit_icq_fn *elevator_exit_icq_fn;	/* ditto */
+ 
+ 	elevator_set_req_fn *elevator_set_req_fn;
+ 	elevator_put_req_fn *elevator_put_req_fn;
+@@ -75,6 +90,8 @@
+ {
+ 	struct list_head list;
+ 	struct elevator_ops ops;
++	size_t icq_size;	/* see iocontext.h */
++	size_t icq_align;	/* ditto */
+ 	struct elv_fs_entry *elevator_attrs;
+ 	char elevator_name[ELV_NAME_MAX];
+ 	struct module *elevator_owner;
+@@ -109,6 +126,7 @@
+ extern void elv_bio_merged(struct request_queue *q, struct request *,
+ 				struct bio *);
+ extern void elv_requeue_request(struct request_queue *, struct request *);
++extern int elv_reinsert_request(struct request_queue *, struct request *);
+ extern struct request *elv_former_request(struct request_queue *, struct request *);
+ extern struct request *elv_latter_request(struct request_queue *, struct request *);
+ extern int elv_register_queue(struct request_queue *q);
