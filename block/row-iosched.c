@@ -247,6 +247,7 @@ static inline void row_get_next_queue(struct row_data *rd)
 static void row_add_request(struct request_queue *q,
 			    struct request *rq)
 {
+	printk(KERN_DEBUG "row_add_request");
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	struct row_queue *rqueue = RQ_ROWQ(rq);
 
@@ -293,13 +294,14 @@ static void row_add_request(struct request_queue *q,
 static int row_reinsert_req(struct request_queue *q,
 			    struct request *rq)
 {
+	printk(KERN_DEBUG "row_reinsert_req");
 	struct row_data    *rd = q->elevator->elevator_data;
 	struct row_queue   *rqueue = RQ_ROWQ(rq);
 
-	/* Verify rqueue is legitimate */
 	if (rqueue->prio >= ROWQ_MAX_PRIO) {
 		pr_err("\n\nROW BUG: row_reinsert_req() rqueue->prio = %d\n",
 			   rqueue->prio);
+	/* Verify rqueue is legitimate */
 		blk_dump_rq_flags(rq, "");
 		return -EIO;
 	}
@@ -318,6 +320,7 @@ static int row_reinsert_req(struct request_queue *q,
  */
 static bool row_urgent_pending(struct request_queue *q)
 {
+	printk(KERN_DEBUG "row_urgent_pending");
 	struct row_data *rd = q->elevator->elevator_data;
 	int i;
 
@@ -413,6 +416,7 @@ static int row_choose_queue(struct row_data *rd)
  */
 static int row_dispatch_requests(struct request_queue *q, int force)
 {
+	printk(KERN_DEBUG "row_dispatch_requests");
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	int ret = 0, currq, i;
 
@@ -498,7 +502,7 @@ done:
  */
 static void *row_init_queue(struct request_queue *q)
 {
-
+	printk(KERN_DEBUG "row_init_queue");
 	struct row_data *rdata;
 	int i;
 
@@ -548,6 +552,7 @@ static void *row_init_queue(struct request_queue *q)
  */
 static void row_exit_queue(struct elevator_queue *e)
 {
+	printk(KERN_DEBUG "row_exit_queue");
 	struct row_data *rd = (struct row_data *)e->elevator_data;
 	int i;
 
@@ -568,6 +573,7 @@ static void row_exit_queue(struct elevator_queue *e)
 static void row_merged_requests(struct request_queue *q, struct request *rq,
 				 struct request *next)
 {
+	printk(KERN_DEBUG "row_merged_requests");
 	struct row_queue   *rqueue = RQ_ROWQ(next);
 
 	list_del_init(&next->queuelist);
@@ -608,6 +614,7 @@ static enum row_queue_prio get_queue_type(struct request *rq)
 static int
 row_set_request(struct request_queue *q, struct request *rq, gfp_t gfp_mask)
 {
+	printk(KERN_DEBUG "row_set_request");
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	unsigned long flags;
 
@@ -718,15 +725,15 @@ static struct elv_fs_entry row_attrs[] = {
 	__ATTR_NULL
 };
 
-static struct elevator_type iosched_row = {
+
 	.ops = {
 		.elevator_merge_req_fn		= row_merged_requests,
 		.elevator_dispatch_fn		= row_dispatch_requests,
 		.elevator_add_req_fn		= row_add_request,
 		.elevator_reinsert_req_fn	= row_reinsert_req,
 		.elevator_is_urgent_fn		= row_urgent_pending,
-		.elevator_former_req_fn		= elv_rb_former_request,
-		.elevator_latter_req_fn		= elv_rb_latter_request,
+		//.elevator_former_req_fn		= row_former_request,
+		//.elevator_latter_req_fn		= row_latter_request,
 		.elevator_set_req_fn		= row_set_request,
 		.elevator_init_fn		= row_init_queue,
 		.elevator_exit_fn		= row_exit_queue,
@@ -739,12 +746,15 @@ static struct elevator_type iosched_row = {
 
 static int __init row_init(void)
 {
+	printk(KERN_DEBUG "row_init before elv_register");
 	elv_register(&iosched_row);
+	printk(KERN_DEBUG "row_init after elv_register");
 	return 0;
 }
 
 static void __exit row_exit(void)
 {
+	printk(KERN_DEBUG "row_exit");
 	elv_unregister(&iosched_row);
 }
 
