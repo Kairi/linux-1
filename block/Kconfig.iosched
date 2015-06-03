@@ -31,6 +31,12 @@ config IOSCHED_ROW
 	  according to queue priority.
 	  Most suitable for mobile devices.
 
+config IOSCHED_SIO
+	bool
+	default y
+	---help---
+		Simple I/O scheduler.
+		
 config IOSCHED_CFQ
 	tristate "CFQ I/O scheduler"
 	default y

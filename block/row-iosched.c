@@ -712,6 +712,7 @@ STORE_FUNCTION(row_read_idle_freq_store, &rowd->read_idle.freq, 1, INT_MAX, 0);
 	__ATTR(name, S_IRUGO|S_IWUSR, row_##name##_show, \
 				      row_##name##_store)
 
+
 static struct elv_fs_entry row_attrs[] = {
 	ROW_ATTR(hp_read_quantum),
 	ROW_ATTR(rp_read_quantum),
@@ -725,7 +726,7 @@ static struct elv_fs_entry row_attrs[] = {
 	__ATTR_NULL
 };
 
-
+static struct elevator_type iosched_row = {
 	.ops = {
 		.elevator_merge_req_fn		= row_merged_requests,
 		.elevator_dispatch_fn		= row_dispatch_requests,
@@ -739,7 +740,7 @@ static struct elv_fs_entry row_attrs[] = {
 		.elevator_exit_fn		= row_exit_queue,
 	},
 
-	.elevator_attrs = row_attrs,
+//	.elevator_attrs = row_attrs,
 	.elevator_name = "row",
 	.elevator_owner = THIS_MODULE,
 };
