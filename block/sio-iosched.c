@@ -35,9 +35,7 @@ static const int fifo_batch     = 8;		/* # of sequential requests treated as one
 /* Elevator data */
 struct sio_data {
 	/* Request queues */
-	struct list_head fifo_list[2][2];
-
-	/* Attributes */
+	struct list_head fifo_list[2][2];	/* Attributes */
 	unsigned int batched;
 	unsigned int starved;
 
@@ -189,7 +187,6 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 static int
 sio_dispatch_requests(struct request_queue *q, int force)
 {
-	printk(KERN_DEBUG "sio_dispatch_request");
 	struct sio_data *sd = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
