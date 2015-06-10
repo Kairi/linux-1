@@ -29,8 +29,7 @@ static const int async_read_expire  =  4 * HZ;	/* ditto for async, these limits 
 static const int async_write_expire = 16 * HZ;	/* ditto for async, these limits are SOFT! */
 
 static const int writes_starved = 2;		/* max times reads can starve a write */
-static const int fifo_batch     = 8;		/* # of sequential requests treated as one
-						   by the above parameters. For throughput. */
+static const int fifo_batch     = 8;		/* # of sequential requests treated as one by the above parameters. For throughput. */
 
 /* Elevator data */
 struct sio_data {
@@ -99,6 +98,7 @@ sio_add_request(struct request_queue *q, struct request *rq)
 static struct request *
 sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 {
+	printk(KERN_DEBUG "sio_expired_request");
 	struct list_head *list = &sd->fifo_list[sync][data_dir];
 	struct request *rq;
 
@@ -118,6 +118,7 @@ sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 static struct request *
 sio_choose_expired_request(struct sio_data *sd)
 {
+	printk(KERN_DEBUG "sio_choose_expired_request");
 	struct request *rq;
 
 	/*
@@ -145,6 +146,7 @@ sio_choose_expired_request(struct sio_data *sd)
 static struct request *
 sio_choose_request(struct sio_data *sd, int data_dir)
 {
+	printk(KERN_DEBUG "sio_choose_request");
 	struct list_head *sync = sd->fifo_list[SYNC];
 	struct list_head *async = sd->fifo_list[ASYNC];
 
@@ -173,6 +175,7 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 	 * Remove the request from the fifo list
 	 * and dispatch it.
 	 */
+	printk(KERN_DEBUG "sio_dispatch_request");
 	rq_fifo_clear(rq);
 	elv_dispatch_add_tail(rq->q, rq);
 
@@ -187,6 +190,7 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 static int
 sio_dispatch_requests(struct request_queue *q, int force)
 {
+	printk(KERN_DEBUG "sio_dispatch_requests");
 	struct sio_data *sd = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
@@ -388,7 +392,6 @@ static int __init sio_init(void)
 
 	return 0;
 }
-
 static void __exit sio_exit(void)
 {
 	/* Unregister elevator */
