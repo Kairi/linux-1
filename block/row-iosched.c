@@ -1,7 +1,19 @@
 /*
  * ROW (Read Over Write) I/O scheduler.
+ *
+ * Copyright (c) 2012, The Linux Foundation. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 and
+ * only version 2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
+/* See Documentation/block/row-iosched.txt */
 
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -37,17 +49,6 @@ enum row_queue_prio {
 
 /* Flags indicating whether idling is enabled on the queue */
 static const bool queue_idling_enabled[] = {
-	true,	/* ROWQ_PRIO_HIGH_READ */
-	true,	/* ROWQ_PRIO_REG_READ */
-	false,	/* ROWQ_PRIO_HIGH_SWRITE */
-	false,	/* ROWQ_PRIO_REG_SWRITE */
-	false,	/* ROWQ_PRIO_REG_WRITE */
-	false,	/* ROWQ_PRIO_LOW_READ */
-	false,	/* ROWQ_PRIO_LOW_SWRITE */
-};
-
-/* Flags indicating whether the queue can notify on urgent requests */
-static const bool urgent_queues[] = {
 	true,	/* ROWQ_PRIO_HIGH_READ */
 	true,	/* ROWQ_PRIO_REG_READ */
 	false,	/* ROWQ_PRIO_HIGH_SWRITE */
@@ -153,7 +154,8 @@ struct row_data {
 	unsigned int			cycle_flags;
 };
 
-#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elv.priv[0])) // modify
+//#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elevator_private[0]))
+#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elv.icq))
 
 #define row_log(q, fmt, args...)   \
 	blk_add_trace_msg(q, "%s():" fmt , __func__, ##args)
@@ -247,14 +249,13 @@ static inline void row_get_next_queue(struct row_data *rd)
 static void row_add_request(struct request_queue *q,
 			    struct request *rq)
 {
-	printk(KERN_DEBUG "row_add_request");
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	struct row_queue *rqueue = RQ_ROWQ(rq);
 
 	list_add_tail(&rq->queuelist, &rqueue->fifo);
 	rd->nr_reqs[rq_data_dir(rq)]++;
-//	rq_set_fifo_time(rq, jiffies); /* for statistics*/
-	(rq)->csd.llist.next = (void *)(jiffies);
+	//rq_set_fifo_time(rq, jiffies); /* for statistics*/
+	rq->fifo_time = jiffies;
 
 	if (queue_idling_enabled[rqueue->prio]) {
 		if (delayed_work_pending(&rd->read_idle.idle_work))
@@ -272,71 +273,10 @@ static void row_add_request(struct request_queue *q,
 
 		rqueue->idle_data.last_insert_time = ktime_get();
 	}
-	if (urgent_queues[rqueue->prio] &&
-	    row_rowq_unserved(rd, rqueue->prio)) {
-		row_log_rowq(rd, rqueue->prio,
-			     "added urgent req curr_queue = %d",
-			     rd->curr_queue);
-	} else
-		row_log_rowq(rd, rqueue->prio, "added request");
+	row_log_rowq(rd, rqueue->prio, "added request");
 }
 
-/**
- * row_reinsert_req() - Reinsert request back to the scheduler
- * @q:	requests queue
- * @rq:	request to add
- *
- * Reinsert the given request back to the queue it was
- * dispatched from as if it was never dispatched.
- *
- * Returns 0 on success, error code otherwise
- */
-static int row_reinsert_req(struct request_queue *q,
-			    struct request *rq)
-{
-	printk(KERN_DEBUG "row_reinsert_req");
-	struct row_data    *rd = q->elevator->elevator_data;
-	struct row_queue   *rqueue = RQ_ROWQ(rq);
-
-	if (rqueue->prio >= ROWQ_MAX_PRIO) {
-		pr_err("\n\nROW BUG: row_reinsert_req() rqueue->prio = %d\n",
-			   rqueue->prio);
-	/* Verify rqueue is legitimate */
-		blk_dump_rq_flags(rq, "");
-		return -EIO;
-	}
-
-	list_add(&rq->queuelist, &rqueue->fifo);
-	rd->nr_reqs[rq_data_dir(rq)]++;
-
-	row_log_rowq(rd, rqueue->prio, "request reinserted");
-
-	return 0;
-}
-
-/**
- * row_urgent_pending() - Return TRUE if there is an urgent
- * @q:	requests queue
- */
-static bool row_urgent_pending(struct request_queue *q)
-{
-	printk(KERN_DEBUG "row_urgent_pending");
-	struct row_data *rd = q->elevator->elevator_data;
-	int i;
-
-	for (i = 0; i < ROWQ_MAX_PRIO; i++)
-		if (urgent_queues[i] && row_rowq_unserved(rd, i) &&
-		    !list_empty(&rd->row_queues[i].rqueue.fifo)) {
-			row_log_rowq(rd, i,
-				     "Urgent request pending (curr=%i)",
-				     rd->curr_queue);
-			return true;
-		}
-
-	return false;
-}
-
-/**
+/*
  * row_remove_request() -  Remove given request from scheduler
  * @q:	requests queue
  * @rq:	request to remove
@@ -416,7 +356,6 @@ static int row_choose_queue(struct row_data *rd)
  */
 static int row_dispatch_requests(struct request_queue *q, int force)
 {
-	printk(KERN_DEBUG "row_dispatch_requests");
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	int ret = 0, currq, i;
 
@@ -500,16 +439,23 @@ done:
  * this dispatch queue
  *
  */
-static void *row_init_queue(struct request_queue *q)
+static int row_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	printk(KERN_DEBUG "row_init_queue");
 	struct row_data *rdata;
+	struct elevator_queue *eq;
 	int i;
+	eq = elevator_alloc(q, e);
+	if (!eq)
+		return -ENOMEM;
 
-	rdata = kmalloc_node(sizeof(*rdata),
-			     GFP_KERNEL | __GFP_ZERO, q->node);
-	if (!rdata)
-		return NULL;
+	rdata = kmalloc_node(sizeof(*rdata), GFP_KERNEL | __GFP_ZERO, q->node);
+	if (!rdata) {
+		kobject_put(&eq->kobj);
+		return -ENOMEM;
+	}
+
+	eq->elevator_data = rdata;
 
 	for (i = 0; i < ROWQ_MAX_PRIO; i++) {
 		INIT_LIST_HEAD(&rdata->row_queues[i].rqueue.fifo);
@@ -517,8 +463,7 @@ static void *row_init_queue(struct request_queue *q)
 		rdata->row_queues[i].rqueue.rdata = rdata;
 		rdata->row_queues[i].rqueue.prio = i;
 		rdata->row_queues[i].rqueue.idle_data.begin_idling = false;
-		rdata->row_queues[i].rqueue.idle_data.last_insert_time =
-			ktime_set(0, 0);
+		rdata->row_queues[i].rqueue.idle_data.last_insert_time = ktime_set(0, 0);
 	}
 
 	/*
@@ -526,24 +471,69 @@ static void *row_init_queue(struct request_queue *q)
 	 * enable it for write queues also, note that idling frequency will
 	 * be the same in both cases
 	 */
+	spin_lock_irq(q->queue_lock);
 	rdata->read_idle.idle_time = msecs_to_jiffies(ROW_IDLE_TIME_MSEC);
 	/* Maybe 0 on some platforms */
 	if (!rdata->read_idle.idle_time)
 		rdata->read_idle.idle_time = 1;
 	rdata->read_idle.freq = ROW_READ_FREQ_MSEC;
-	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work",
-					    WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work", WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
 	if (!rdata->read_idle.idle_workqueue)
 		panic("Failed to create idle workqueue\n");
 	INIT_DELAYED_WORK(&rdata->read_idle.idle_work, kick_queue);
-
 	rdata->curr_queue = ROWQ_PRIO_HIGH_READ;
 	rdata->dispatch_queue = q;
-
 	rdata->nr_reqs[READ] = rdata->nr_reqs[WRITE] = 0;
+	spin_unlock_irq(q->queue_lock);
 
-	return rdata;
+	return 0;
+
 }
+
+// static void *row_init_queue(struct request_queue *q)
+// {
+//
+// 	struct row_data *rdata;
+// 	int i;
+//
+// 	rdata = kmalloc_node(sizeof(*rdata),
+// 			     GFP_KERNEL | __GFP_ZERO, q->node);
+// 	if (!rdata)
+// 		return NULL;
+//
+// 	for (i = 0; i < ROWQ_MAX_PRIO; i++) {
+// 		INIT_LIST_HEAD(&rdata->row_queues[i].rqueue.fifo);
+// 		rdata->row_queues[i].disp_quantum = queue_quantum[i];
+// 		rdata->row_queues[i].rqueue.rdata = rdata;
+// 		rdata->row_queues[i].rqueue.prio = i;
+// 		rdata->row_queues[i].rqueue.idle_data.begin_idling = false;
+// 		rdata->row_queues[i].rqueue.idle_data.last_insert_time =
+// 			ktime_set(0, 0);
+// 	}
+//
+// 	/*
+// 	 * Currently idling is enabled only for READ queues. If we want to
+// 	 * enable it for write queues also, note that idling frequency will
+// 	 * be the same in both cases
+// 	 */
+// 	rdata->read_idle.idle_time = msecs_to_jiffies(ROW_IDLE_TIME_MSEC);
+// 	/* Maybe 0 on some platforms */
+// 	if (!rdata->read_idle.idle_time)
+// 		rdata->read_idle.idle_time = 1;
+// 	rdata->read_idle.freq = ROW_READ_FREQ_MSEC;
+// 	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work",
+// 					    WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+// 	if (!rdata->read_idle.idle_workqueue)
+// 		panic("Failed to create idle workqueue\n");
+// 	INIT_DELAYED_WORK(&rdata->read_idle.idle_work, kick_queue);
+//
+// 	rdata->curr_queue = ROWQ_PRIO_HIGH_READ;
+// 	rdata->dispatch_queue = q;
+//
+// 	rdata->nr_reqs[READ] = rdata->nr_reqs[WRITE] = 0;
+//
+// 	return rdata;
+// }
 
 /*
  * row_exit_queue() - called on unloading the RAW scheduler
@@ -552,7 +542,6 @@ static void *row_init_queue(struct request_queue *q)
  */
 static void row_exit_queue(struct elevator_queue *e)
 {
-	printk(KERN_DEBUG "row_exit_queue");
 	struct row_data *rd = (struct row_data *)e->elevator_data;
 	int i;
 
@@ -573,10 +562,10 @@ static void row_exit_queue(struct elevator_queue *e)
 static void row_merged_requests(struct request_queue *q, struct request *rq,
 				 struct request *next)
 {
-	printk(KERN_DEBUG "row_merged_requests");
 	struct row_queue   *rqueue = RQ_ROWQ(next);
 
-	list_del_init(&next->queuelist);
+	//list_del_init(&next->queuelist);
+	rq_fifo_clear(next);
 
 	rqueue->rdata->nr_reqs[rq_data_dir(rq)]--;
 }
@@ -611,16 +600,16 @@ static enum row_queue_prio get_queue_type(struct request *rq)
  * @gfp_mask:	ignored
  *
  */
+
 static int
-row_set_request(struct request_queue *q, struct request *rq, gfp_t gfp_mask)
+row_set_request(struct request_queue *q, struct request *rq, struct bio *bio,  gfp_t gfp_mask)
 {
-	printk(KERN_DEBUG "row_set_request");
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	unsigned long flags;
 
 	spin_lock_irqsave(q->queue_lock, flags);
-	rq->elv.priv[0] =
-		(void *)(&rd->row_queues[get_queue_type(rq)]);
+	//rq->elevator_private[0] =	(void *)(&rd->row_queues[get_queue_type(rq)]);
+	rq->elv.icq = (void *)(&rd->row_queues[get_queue_type(rq)]);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 
 	return 0;
@@ -712,7 +701,6 @@ STORE_FUNCTION(row_read_idle_freq_store, &rowd->read_idle.freq, 1, INT_MAX, 0);
 	__ATTR(name, S_IRUGO|S_IWUSR, row_##name##_show, \
 				      row_##name##_store)
 
-
 static struct elv_fs_entry row_attrs[] = {
 	ROW_ATTR(hp_read_quantum),
 	ROW_ATTR(rp_read_quantum),
@@ -731,36 +719,31 @@ static struct elevator_type iosched_row = {
 		.elevator_merge_req_fn		= row_merged_requests,
 		.elevator_dispatch_fn		= row_dispatch_requests,
 		.elevator_add_req_fn		= row_add_request,
-		.elevator_reinsert_req_fn	= row_reinsert_req,
-		.elevator_is_urgent_fn		= row_urgent_pending,
-		//.elevator_former_req_fn		= row_former_request,
-		//.elevator_latter_req_fn		= row_latter_request,
+		.elevator_former_req_fn		= elv_rb_former_request,
+		.elevator_latter_req_fn		= elv_rb_latter_request,
 		.elevator_set_req_fn		= row_set_request,
 		.elevator_init_fn		= row_init_queue,
 		.elevator_exit_fn		= row_exit_queue,
 	},
 
-//	.elevator_attrs = row_attrs,
+	.elevator_attrs = row_attrs,
 	.elevator_name = "row",
 	.elevator_owner = THIS_MODULE,
 };
 
 static int __init row_init(void)
 {
-	printk(KERN_DEBUG "row_init before elv_register");
 	elv_register(&iosched_row);
-	printk(KERN_DEBUG "row_init after elv_register");
 	return 0;
 }
 
 static void __exit row_exit(void)
 {
-	printk(KERN_DEBUG "row_exit");
 	elv_unregister(&iosched_row);
 }
 
 module_init(row_init);
 module_exit(row_exit);
 
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPLv2");
 MODULE_DESCRIPTION("Read Over Write IO scheduler");

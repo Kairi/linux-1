@@ -167,6 +167,7 @@ static int zen_dispatch_requests(struct request_queue *q, int force)
 
 static int zen_init_queue(struct request_queue *q, struct elevator_type *e)
 {
+	printk(KERN_DEBUG "zen_init_queue()");
 	struct zen_data *zdata;
 	struct elevator_queue *eq;
 
@@ -215,8 +216,8 @@ static void zen_exit_queue(struct elevator_queue *e)
 {
 	struct zen_data *zdata = e->elevator_data;
 
-	BUG_ON(!list_empty(&zdata->fifo_list[SYNC]));
-	BUG_ON(!list_empty(&zdata->fifo_list[ASYNC]));
+	//BUG_ON(!list_empty(&zdata->fifo_list[SYNC]));
+	//BUG_ON(!list_empty(&zdata->fifo_list[ASYNC])); //tmp
 	kfree(zdata);
 }
 
@@ -311,7 +312,7 @@ module_init(zen_init);
 module_exit(zen_exit);
 
 
-MODULE_AUTHOR("Brandon Berhent");
+MODULE_AUTHOR("Kairi OKUMURA");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Zen IO scheduler");
 MODULE_VERSION("1.0");

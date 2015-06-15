@@ -14,14 +14,10 @@
 #include <linux/bio.h>
 #include <linux/module.h>
 #include <linux/init.h>
-// #include <linux/version.h>
-// #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
-// #include <linux/slab.h>
-// #endif
 
 enum { ASYNC, SYNC };
 
-/* Tunables */
+/* Tunables (sysfs parameters)*/
 static const int sync_read_expire  = HZ / 2;	/* max time before a sync read is submitted. */
 static const int sync_write_expire = 2 * HZ;	/* max time before a sync write is submitted. */
 
@@ -45,8 +41,7 @@ struct sio_data {
 };
 
 static void
-sio_merged_requests(struct request_queue *q, struct request *rq,
-		    struct request *next)
+sio_merged_requests(struct request_queue *q, struct request *rq, struct request *next)
 {
 	/*
 	 * If next expires before rq, assign its expire time to rq
@@ -54,54 +49,42 @@ sio_merged_requests(struct request_queue *q, struct request *rq,
 	 */
 	printk(KERN_DEBUG "sio_merged_requests");
 	if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist)) {
-		if (time_before((unsigned long)((next)->csd.llist.next),
-										(unsigned long)((rq)->csd.llist.next))){
+		if (time_before(next->fifo_time, rq->fifo_time)){
 			list_move(&rq->queuelist, &next->queuelist);
-			//rq_set_fifo_time(rq, rq_fifo_time(next));
-			(rq)->csd.llist.next = (void *)((next)->csd.llist.next);
+			rq->fifo_time = next->fifo_time;
 		}
 	}
 
-	/* Delete next request */
+	/*
+	 Delete next request.
+	#define rq_fifo_clear(rq)       list_del_init(&(rq)->queuelist)
+	*/
 	rq_fifo_clear(next);
 }
 
 static void
 sio_add_request(struct request_queue *q, struct request *rq)
 {
-	printk(KERN_DEBUG "sio_add_request");
 	struct sio_data *sd = q->elevator->elevator_data;
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
-
+	printk(KERN_DEBUG "sio_add_request");
 	/*
 	 * Add request to the proper fifo list and set its
 	 * expire time.
 	 */
-	//rq_set_fifo_time(rq, jiffies + sd->fifo_expire[sync][data_dir]);
-	(rq)->csd.llist.next = (void *)(jiffies + sd->fifo_expire[sync][data_dir]);
+	rq->fifo_time = jiffies + sd->fifo_expire[sync][data_dir];
 	list_add_tail(&rq->queuelist, &sd->fifo_list[sync][data_dir]);
 }
-
-// #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
-// static int
-// sio_queue_empty(struct request_queue *q)
-// {
-// 	struct sio_data *sd = q->elevator->elevator_data;
-//
-// 	/* Check if fifo lists are empty */
-// 	return list_empty(&sd->fifo_list[SYNC][READ]) && list_empty(&sd->fifo_list[SYNC][WRITE]) &&
-// 	       list_empty(&sd->fifo_list[ASYNC][READ]) && list_empty(&sd->fifo_list[ASYNC][WRITE]);
-// }
-// #endif
 
 static struct request *
 sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 {
-	printk(KERN_DEBUG "sio_expired_request");
+
 	struct list_head *list = &sd->fifo_list[sync][data_dir];
 	struct request *rq;
 
+	printk(KERN_DEBUG "sio_expired_request");
 	if (list_empty(list))
 		return NULL;
 
@@ -109,7 +92,7 @@ sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 	rq = rq_entry_fifo(list->next);
 
 	/* Request has expired */
-	if (time_after(jiffies, (unsigned long)(rq)->csd.llist.next))
+	if (time_after(jiffies, rq->fifo_time))
 		return rq;
 
 	return NULL;
@@ -118,9 +101,8 @@ sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 static struct request *
 sio_choose_expired_request(struct sio_data *sd)
 {
-	printk(KERN_DEBUG "sio_choose_expired_request");
 	struct request *rq;
-
+	printk(KERN_DEBUG "sio_choose_expired_request");
 	/*
 	 * Check expired requests.
 	 * Asynchronous requests have priority over synchronous.
@@ -146,23 +128,22 @@ sio_choose_expired_request(struct sio_data *sd)
 static struct request *
 sio_choose_request(struct sio_data *sd, int data_dir)
 {
-	printk(KERN_DEBUG "sio_choose_request");
 	struct list_head *sync = sd->fifo_list[SYNC];
 	struct list_head *async = sd->fifo_list[ASYNC];
-
+	printk(KERN_DEBUG "sio_choose_request");
 	/*
 	 * Retrieve request from available fifo list.
 	 * Synchronous requests have priority over asynchronous.
 	 * Read requests have priority over write.
 	 */
-	if (!list_empty(&sync[data_dir]))
+	if (!list_empty(&sync[data_dir])) // sync read
 		return rq_entry_fifo(sync[data_dir].next);
-	if (!list_empty(&async[data_dir]))
+	if (!list_empty(&async[data_dir])) // async read
 		return rq_entry_fifo(async[data_dir].next);
 
-	if (!list_empty(&sync[!data_dir]))
+	if (!list_empty(&sync[!data_dir])) // sync write
 		return rq_entry_fifo(sync[!data_dir].next);
-	if (!list_empty(&async[!data_dir]))
+	if (!list_empty(&async[!data_dir])) // async write
 		return rq_entry_fifo(async[!data_dir].next);
 
 	return NULL;
@@ -190,10 +171,12 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 static int
 sio_dispatch_requests(struct request_queue *q, int force)
 {
-	printk(KERN_DEBUG "sio_dispatch_requests");
+
 	struct sio_data *sd = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
+
+	printk(KERN_DEBUG "sio_dispatch_requests");
 
 	/*
 	 * Retrieve any expired request after a batch of
@@ -223,11 +206,11 @@ sio_dispatch_requests(struct request_queue *q, int force)
 static struct request *
 sio_former_request(struct request_queue *q, struct request *rq)
 {
-	printk(KERN_DEBUG "sio_former_request");
 	struct sio_data *sd = q->elevator->elevator_data;
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 
+	printk(KERN_DEBUG "sio_former_request");
 	if (rq->queuelist.prev == &sd->fifo_list[sync][data_dir])
 		return NULL;
 
@@ -238,11 +221,11 @@ sio_former_request(struct request_queue *q, struct request *rq)
 static struct request *
 sio_latter_request(struct request_queue *q, struct request *rq)
 {
-	printk(KERN_DEBUG "sio_latter_request");
 	struct sio_data *sd = q->elevator->elevator_data;
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 
+	printk(KERN_DEBUG "sio_latter_request");
 	if (rq->queuelist.next == &sd->fifo_list[sync][data_dir])
 		return NULL;
 
@@ -250,24 +233,30 @@ sio_latter_request(struct request_queue *q, struct request *rq)
 	return list_entry(rq->queuelist.next, struct request, queuelist);
 }
 
-static void *
-sio_init_queue(struct request_queue *q)
+static int sio_init_queue(struct request_queue *q, struct elevator_type *e)
 {
-	printk(KERN_DEBUG "request_queue");
 	struct sio_data *sd;
+	struct elevator_queue *eq;
 
-	/* Allocate structure */
-	sd = kmalloc_node(sizeof(*sd), GFP_KERNEL, q->node);
-	if (!sd)
+	printk(KERN_DEBUG "sio_init_queue()");
+	eq = elevator_alloc(q, e);
+	if (!eq)
 		return -ENOMEM;
 
-	/* Initialize fifo lists */
+	sd = kmalloc_node(sizeof(*sd), GFP_KERNEL, q->node);
+	if (!sd) {
+		kobject_put(&eq->kobj);
+		return -ENOMEM;
+	}
+	eq->elevator_data = sd;
 	INIT_LIST_HEAD(&sd->fifo_list[SYNC][READ]);
 	INIT_LIST_HEAD(&sd->fifo_list[SYNC][WRITE]);
 	INIT_LIST_HEAD(&sd->fifo_list[ASYNC][READ]);
 	INIT_LIST_HEAD(&sd->fifo_list[ASYNC][WRITE]);
 
+	spin_lock_irq(q->queue_lock);
 	/* Initialize data */
+	q->elevator = eq;
 	sd->batched = 0;
 	sd->fifo_expire[SYNC][READ] = sync_read_expire;
 	sd->fifo_expire[SYNC][WRITE] = sync_write_expire;
@@ -275,16 +264,17 @@ sio_init_queue(struct request_queue *q)
 	sd->fifo_expire[ASYNC][WRITE] = async_write_expire;
 	sd->fifo_batch = fifo_batch;
 
-	q->elevator->elevator_data = sd;
+	//q->elevator->elevator_data = sd;
+	spin_unlock_irq(q->queue_lock);
+
 	return 0;
 }
 
 static void
 sio_exit_queue(struct elevator_queue *e)
 {
-	printk(KERN_DEBUG "sio_exit_queue");
 	struct sio_data *sd = e->elevator_data;
-
+	printk(KERN_DEBUG "sio_exit_queue");
 	BUG_ON(!list_empty(&sd->fifo_list[SYNC][READ]));
 	BUG_ON(!list_empty(&sd->fifo_list[SYNC][WRITE]));
 	BUG_ON(!list_empty(&sd->fifo_list[ASYNC][READ]));
