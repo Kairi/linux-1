@@ -29,7 +29,7 @@ struct zen_data {
 	/* Requests are only present on fifo_list */
 	struct list_head fifo_list[2];
 
-        unsigned int batching;          /* number of sequential requests made */
+	unsigned int batching;          /* number of sequential requests made */
 
 	/* tunables */
 	int fifo_expire[2];
@@ -52,14 +52,11 @@ zen_merged_requests(struct request_queue *q, struct request *req,
 	 * and move into next position (next will be deleted) in fifo
 	 */
 	if (!list_empty(&req->queuelist) && !list_empty(&next->queuelist)) {
-//		if (time_before(rq_fifo_time(next), rq_fifo_time(req))) { //deprecate rq_fifo_time() and  rq_set_fifo_time().
 		if (time_before(next->fifo_time, req->fifo_time)) {
 			list_move(&req->queuelist, &next->queuelist);
-//			rq_set_fifo_time(req, rq_fifo_time(next));
 			req->fifo_time = next->fifo_time;
 		}
 	}
-
 	/* next request is gone */
 	rq_fifo_clear(next);
 }
@@ -70,7 +67,6 @@ static void zen_add_request(struct request_queue *q, struct request *rq)
 	const int dir = rq_data_dir(rq);
 
 	if (zdata->fifo_expire[dir]) {
-		//rq_set_fifo_time(rq, jiffies + zdata->fifo_expire[dir]);
 		rq->fifo_time = jiffies + zdata->fifo_expire[dir];
 		list_add_tail(&rq->queuelist, &zdata->fifo_list[dir]);
 	}
@@ -92,17 +88,17 @@ static void zen_dispatch(struct zen_data *zdata, struct request *rq)
 static struct request *
 zen_expired_request(struct zen_data *zdata, int ddir)
 {
-        struct request *rq;
+	struct request *rq;
 
-        if (list_empty(&zdata->fifo_list[ddir]))
-                return NULL;
+	if (list_empty(&zdata->fifo_list[ddir]))
+		return NULL;
 
-        rq = rq_entry_fifo(zdata->fifo_list[ddir].next);
-        //if (time_after(jiffies, rq_fifo_time(rq)))
-		if (time_after(jiffies, rq->fifo_time))
-                return rq;
+	rq = rq_entry_fifo(zdata->fifo_list[ddir].next);
+	//if (time_after(jiffies, rq_fifo_time(rq)))
+	if (time_after(jiffies, rq->fifo_time))
+		return rq;
 
-        return NULL;
+	return NULL;
 }
 
 /*
@@ -112,52 +108,56 @@ zen_expired_request(struct zen_data *zdata, int ddir)
 static struct request *
 zen_check_fifo(struct zen_data *zdata)
 {
-        struct request *rq_sync = zen_expired_request(zdata, SYNC);
-        struct request *rq_async = zen_expired_request(zdata, ASYNC);
+	struct request *rq_sync = zen_expired_request(zdata, SYNC);
+    
+	struct request *rq_async = zen_expired_request(zdata, ASYNC);
 
-        if (rq_async && rq_sync) {
-        	//if (time_after(rq_fifo_time(rq_async), rq_fifo_time(rq_sync)))
-			if (time_after(rq_async->fifo_time, rq_sync->fifo_time))
-                	return rq_sync;
-        } else if (rq_sync) {
-                return rq_sync;
+	if (rq_async && rq_sync) {
+		if (time_after(rq_async->fifo_time, rq_sync->fifo_time))
+			return rq_sync;
+	} else if (rq_sync) {
+		return rq_sync;
 	} else if (rq_async) {
 		return rq_async;
 	}
 
-        return 0;
+	return 0;
 }
 
 static struct request *
 zen_choose_request(struct zen_data *zdata)
 {
-        /*
-         * Retrieve request from available fifo list.
-         * Synchronous requests have priority over asynchronous.
-         */
-        if (!list_empty(&zdata->fifo_list[SYNC]))
-                return rq_entry_fifo(zdata->fifo_list[SYNC].next);
-        if (!list_empty(&zdata->fifo_list[ASYNC]))
-                return rq_entry_fifo(zdata->fifo_list[ASYNC].next);
+	/*
+	 * Retrieve request from available fifo list.
+	 * Synchronous requests have priority over asynchronous.
+	 */
+	if (!list_empty(&zdata->fifo_list[SYNC]))
+		return rq_entry_fifo(zdata->fifo_list[SYNC].next);
+	if (!list_empty(&zdata->fifo_list[ASYNC]))
+		return rq_entry_fifo(zdata->fifo_list[ASYNC].next);
 
-        return NULL;
+	return NULL;
 }
 
+/*
+  zen_dispatch_reqeusts ---> zen_check_fifo ---> zen_expired_request ---> (zen_choose_request) -> return
+  
+ */
 static int zen_dispatch_requests(struct request_queue *q, int force)
 {
-	struct zen_data *zdata = zen_get_data(q);
+	struct zen_data *zdata = zen_get_data(q); // q->elevator->elevator_data
 	struct request *rq = NULL;
 
 	/* Check for and issue expired requests */
 	if (zdata->batching > zdata->fifo_batch) {
 		zdata->batching = 0;
-		rq = zen_check_fifo(zdata);
+		rq = zen_check_fifo(zdata); // ret expired request 
 	}
 
-	if (!rq) {
+	if (!rq) { // NOT exist expired request
 		rq = zen_choose_request(zdata);
 		if (!rq)
-			return 0;
+			return 0; // NOT exist request
 	}
 
 	zen_dispatch(zdata, rq);
@@ -167,10 +167,10 @@ static int zen_dispatch_requests(struct request_queue *q, int force)
 
 static int zen_init_queue(struct request_queue *q, struct elevator_type *e)
 {
-	printk(KERN_DEBUG "zen_init_queue()");
 	struct zen_data *zdata;
 	struct elevator_queue *eq;
-
+	printk(KERN_DEBUG "zen_init_queue()");
+	
 	eq = elevator_alloc(q, e);
 	if (!eq)
 		return -ENOMEM;
@@ -180,11 +180,13 @@ static int zen_init_queue(struct request_queue *q, struct elevator_type *e)
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
 	}
+
 	eq->elevator_data = zdata;
 	INIT_LIST_HEAD(&zdata->fifo_list[SYNC]);
 	INIT_LIST_HEAD(&zdata->fifo_list[ASYNC]);
 
 	spin_lock_irq(q->queue_lock);
+	// Initialize data
 	q->elevator = eq;
 	zdata->fifo_expire[SYNC] = sync_expire;
 	zdata->fifo_expire[ASYNC] = async_expire;
@@ -195,29 +197,13 @@ static int zen_init_queue(struct request_queue *q, struct elevator_type *e)
 
 }
 
-/*
-static void *zen_init_queue(struct request_queue *q)
-{
-	struct zen_data *zdata;
-
-	zdata = kmalloc_node(sizeof(*zdata), GFP_KERNEL, q->node);
-	if (!zdata)
-		return NULL;
-	INIT_LIST_HEAD(&zdata->fifo_list[SYNC]);
-	INIT_LIST_HEAD(&zdata->fifo_list[ASYNC]);
-	zdata->fifo_expire[SYNC] = sync_expire;
-	zdata->fifo_expire[ASYNC] = async_expire;
-	zdata->fifo_batch = fifo_batch;
-	return zdata;
-}
-*/
-
 static void zen_exit_queue(struct elevator_queue *e)
 {
 	struct zen_data *zdata = e->elevator_data;
-
-	//BUG_ON(!list_empty(&zdata->fifo_list[SYNC]));
-	//BUG_ON(!list_empty(&zdata->fifo_list[ASYNC])); //tmp
+	printk(KERN_DEBUG "zen_exit_queue");
+		
+	BUG_ON(!list_empty(&zdata->fifo_list[SYNC]));
+	BUG_ON(!list_empty(&zdata->fifo_list[ASYNC])); 
 	kfree(zdata);
 }
 
@@ -315,4 +301,4 @@ module_exit(zen_exit);
 MODULE_AUTHOR("Kairi OKUMURA");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Zen IO scheduler");
-MODULE_VERSION("1.0");
+MODULE_VERSION("0.1");

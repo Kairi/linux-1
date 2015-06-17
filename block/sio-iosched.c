@@ -40,6 +40,12 @@ struct sio_data {
 	int writes_starved;
 };
 
+
+/*
+  elevator_merge_req_fn
+  called when two requests get merged. the one which gets merged into the other one will be never seen by I/O scheduler again.
+  IOW, after being merged, the request is gone.
+ */
 static void
 sio_merged_requests(struct request_queue *q, struct request *rq, struct request *next)
 {
@@ -57,9 +63,8 @@ sio_merged_requests(struct request_queue *q, struct request *rq, struct request 
 
 	/*
 	 Delete next request.
-	#define rq_fifo_clear(rq)       list_del_init(&(rq)->queuelist)
 	*/
-	rq_fifo_clear(next);
+	rq_fifo_clear(next); //	#define rq_fifo_clear(rq)       list_del_init(&(rq)->queuelist)
 }
 
 static void
@@ -89,15 +94,16 @@ sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 		return NULL;
 
 	/* Retrieve request */
-	rq = rq_entry_fifo(list->next);
+	rq = rq_entry_fifo(list->next); // #define rq_entry_fifo(ptr)	list_entry((ptr), struct request, queuelist)
 
 	/* Request has expired */
-	if (time_after(jiffies, rq->fifo_time))
+	if (time_after(jiffies, rq->fifo_time)) // time_after(a,b) returns true if the time a is after time b.
 		return rq;
 
 	return NULL;
 }
 
+// get expires request
 static struct request *
 sio_choose_expired_request(struct sio_data *sd)
 {
@@ -162,12 +168,17 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 
 	sd->batched++;
 
-	if (rq_data_dir(rq))
+	if (rq_data_dir(rq)) // #define rq_data_dir(rq)         (((rq)->cmd_flags & 1) != 0)
 		sd->starved = 0;
 	else
 		sd->starved++;
 }
 
+/*
+  sio_dispatch_requests ---> sio_choose_expired_request -> sio_expired_request -|
+                         |                                                      |
+			  -> sio_shoose_request -> ------------------------------> sio_dispatch_request
+ */
 static int
 sio_dispatch_requests(struct request_queue *q, int force)
 {
@@ -233,12 +244,16 @@ sio_latter_request(struct request_queue *q, struct request *rq)
 	return list_entry(rq->queuelist.next, struct request, queuelist);
 }
 
+
+/*
+  Initialization
+ */
 static int sio_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	struct sio_data *sd;
 	struct elevator_queue *eq;
-
 	printk(KERN_DEBUG "sio_init_queue()");
+	
 	eq = elevator_alloc(q, e);
 	if (!eq)
 		return -ENOMEM;
@@ -263,13 +278,15 @@ static int sio_init_queue(struct request_queue *q, struct elevator_type *e)
 	sd->fifo_expire[ASYNC][READ] = async_read_expire;
 	sd->fifo_expire[ASYNC][WRITE] = async_write_expire;
 	sd->fifo_batch = fifo_batch;
-
 	//q->elevator->elevator_data = sd;
 	spin_unlock_irq(q->queue_lock);
 
 	return 0;
 }
 
+/*
+  Finishalize
+ */
 static void
 sio_exit_queue(struct elevator_queue *e)
 {
@@ -392,7 +409,7 @@ static void __exit sio_exit(void)
 module_init(sio_init);
 module_exit(sio_exit);
 
-MODULE_AUTHOR("Kairi OKUMURA");
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Simple IO scheduler");
 MODULE_VERSION("0.1");

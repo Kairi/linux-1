@@ -75,9 +75,9 @@ static const int queue_quantum[] = {
 
 /**
  * struct rowq_idling_data -  parameters for idling on the queue
- * @last_insert_time:	time the last request was inserted
- *			to the queue
- * @begin_idling:	flag indicating wether we should idle
+ * @last_insert_time:time the last request was inserted
+ *to the queue
+ * @begin_idling:flag indicating wether we should idle
  *
  */
 struct rowq_idling_data {
@@ -719,10 +719,10 @@ static struct elevator_type iosched_row = {
 		.elevator_merge_req_fn		= row_merged_requests,
 		.elevator_dispatch_fn		= row_dispatch_requests,
 		.elevator_add_req_fn		= row_add_request,
-		.elevator_former_req_fn		= elv_rb_former_request,
-		.elevator_latter_req_fn		= elv_rb_latter_request,
+		.elevator_former_req_fn	= elv_rb_former_request,
+		.elevator_latter_req_fn	= elv_rb_latter_request,
 		.elevator_set_req_fn		= row_set_request,
-		.elevator_init_fn		= row_init_queue,
+		.elevator_init_fn           = row_init_queue,
 		.elevator_exit_fn		= row_exit_queue,
 	},
 

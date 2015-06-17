@@ -28,6 +28,12 @@
 #define CFQ_WEIGHT_MAX		1000
 #define CFQ_WEIGHT_DEFAULT	500
 
+
+// for my original scheduler.
+#define LB_WEIGHT_MIN		10
+#define LB_WEIGHT_MAX		1000
+#define LB_WEIGHT_DEFAULT	500
+
 #ifdef CONFIG_BLK_CGROUP
 
 enum blkg_rwstat_type {
