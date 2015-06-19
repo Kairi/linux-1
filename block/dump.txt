@@ -1,0 +1,170 @@
+[   56.721059] BUG: unable to handle kernel NULL pointer dereference at 0000000000000008
+[   56.721214] IP: [<ffffffff812fe0cb>] elv_merge+0xcb/0xf0
+[   56.721214] PGD 6b067 PUD 71067 PMD 0
+[   56.721214] Oops: 0000 [#1] SMP
+[   56.721214] Modules linked in:
+[   56.721214] CPU: 0 PID: 903 Comm: jbd2/sda-8 Not tainted 4.1.0-rc1+ #55
+[   56.721214] Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.8.1-20150422_083828-anatol 04/01/2014
+[   56.721214] task: ffff8800071e1b30 ti: ffff8800069d4000 task.ti: ffff8800069d4000
+[   56.721214] RIP: 0010:[<ffffffff812fe0cb>]  [<ffffffff812fe0cb>] elv_merge+0xcb/0xf0
+[   56.721214] RSP: 0018:ffff8800069d7b68  EFLAGS: 00000046
+[   56.721214] RAX: 0000000000000000 RBX: ffff88000001bb80 RCX: 00000000000000c9
+[   56.721214] RDX: 0000000000000000 RSI: 0000000000008d8c RDI: ffff8800068af800
+[   56.721214] RBP: ffff8800069d7b98 R08: 0000000000000010 R09: 0000000000000000
+[   56.721214] R10: 0000000000000001 R11: ffff880000809000 R12: ffff880006a63300
+[   56.721214] R13: ffff8800069d7bc0 R14: ffff8800068af800 R15: 0000000000000000
+[   56.721214] FS:  0000000000000000(0000) GS:ffff880007c00000(0000) knlGS:0000000000000000
+[   56.721214] CS:  0010 DS: 0000 ES: 0000 CR0: 000000008005003b
+[   56.721214] CR2: 0000000000000008 CR3: 0000000006a5a000 CR4: 00000000000006f0
+[   56.721214] DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+[   56.721214] DR3: 0000000000000000 DR6: 0000000000000000 DR7: 0000000000000000
+[   56.721214] Stack:
+[   56.721214]  ffff8800069d7bc8 ffff88000001bb80 0000000000000010 0000000000000411
+[   56.721214]  0000000000000000 ffff8800069c6000 ffff8800069d7be8 ffffffff8130554c
+[   56.721214]  ffff880006fc64e0 ffff880006a63300 0000000006ff17b8 ffff880006a63300
+[   56.721214] Call Trace:
+[   56.721214]  [<ffffffff8130554c>] blk_queue_bio+0x7c/0x370
+[   56.721214]  [<ffffffff813011a8>] generic_make_request+0xb8/0x100
+[   56.721214]  [<ffffffff81301252>] submit_bio+0x62/0x150
+[   56.721214]  [<ffffffff811b3b37>] _submit_bh+0x117/0x180
+[   56.721214]  [<ffffffff811b3bab>] submit_bh+0xb/0x10
+[   56.721214]  [<ffffffff8124bbd9>] jbd2_journal_commit_transaction+0x809/0x1820
+[   56.721214]  [<ffffffff81082b47>] ? put_prev_task_fair+0x27/0x40
+[   56.721214]  [<ffffffff810ae3f6>] ? lock_timer_base.isra.34+0x26/0x50
+[   56.721214]  [<ffffffff812502e6>] kjournald2+0xb6/0x240
+[   56.721214]  [<ffffffff8108c940>] ? wake_atomic_t_function+0x60/0x60
+[   56.721214]  [<ffffffff81250230>] ? commit_timeout+0x10/0x10
+[   56.721214]  [<ffffffff8106f284>] kthread+0xc4/0xe0
+[   56.721214]  [<ffffffff8106f1c0>] ? kthread_worker_fn+0x180/0x180
+[   56.721214]  [<ffffffff818b2492>] ret_from_fork+0x42/0x70
+[   56.721214]  [<ffffffff8106f1c0>] ? kthread_worker_fn+0x180/0x180
+[   56.721214] Code: 31 c0 c3 0f 1f 44 00 00 48 8b 7b 10 4c 89 e6 e8 1c c7 00 00 85 c0 74 8b 48 8b 53 10 49 89 55 00 eb 8f 66 0f 1f 44 00 00 49 8b 06 <48> 8b 40 08 48 85 c0 0f 84 77 ff ff ff 4c 89 e2 4c 89 ee 48 89
+[   56.721214] RIP  [<ffffffff812fe0cb>] elv_merge+0xcb/0xf0
+[   56.721214]  RSP <ffff8800069d7b68>
+[   56.721214] CR2: 0000000000000008
+[   56.721214] ---[ end trace 6c34de36725ad55a ]---
+
+int elv_merge(struct request_queue *q, struct request **req, struct bio *bio)
+{
+	struct elevator_queue *e = q->elevator;
+	struct request *__rq;
+	int ret;
+
+	/*
+	 * Levels of merges:
+	 * 	nomerges:  No merges at all attempted
+	 * 	noxmerges: Only simple one-hit cache try
+	 * 	merges:	   All merge tries attempted
+	 */
+	if (blk_queue_nomerges(q))
+		return ELEVATOR_NO_MERGE;
+
+	/*
+	 * First try one-hit cache.
+	 */
+	if (q->last_merge && elv_rq_merge_ok(q->last_merge, bio)) {
+		ret = blk_try_merge(q->last_merge, bio);
+		if (ret != ELEVATOR_NO_MERGE) {
+			*req = q->last_merge;
+			return ret;
+		}
+	}
+
+	if (blk_queue_noxmerges(q))
+		return ELEVATOR_NO_MERGE;
+
+	/*
+	 * See if our hash lookup can find a potential backmerge.
+	 */
+	__rq = elv_rqhash_find(q, bio->bi_iter.bi_sector);
+	if (__rq && elv_rq_merge_ok(__rq, bio)) {
+		*req = __rq;
+		return ELEVATOR_BACK_MERGE;
+	}
+
+	if (e->type->ops.elevator_merge_fn)
+		return e->type->ops.elevator_merge_fn(q, req, bio);
+
+	return ELEVATOR_NO_MERGE;
+}
+
+Dump of assembler code for function elv_merge:
+   0xffffffff812fe000 <+0>:     mov    0x450(%rdi),%rax
+   0xffffffff812fe007 <+7>:     test   $0x1,%ah
+   0xffffffff812fe00a <+10>:    jne    0xffffffff812fe0a0 <elv_merge+160>
+   0xffffffff812fe010 <+16>:    push   %rbp
+   0xffffffff812fe011 <+17>:    mov    %rsp,%rbp
+   0xffffffff812fe014 <+20>:    push   %r15
+   0xffffffff812fe016 <+22>:    push   %r14
+   0xffffffff812fe018 <+24>:    push   %r13
+   0xffffffff812fe01a <+26>:    push   %r12
+   0xffffffff812fe01c <+28>:    mov    %rsi,%r13
+   0xffffffff812fe01f <+31>:    push   %rbx
+   0xffffffff812fe020 <+32>:    mov    %rdi,%rbx
+   0xffffffff812fe023 <+35>:    mov    %rdx,%r12
+   0xffffffff812fe026 <+38>:    sub    $0x8,%rsp
+   0xffffffff812fe02a <+42>:    mov    0x18(%rdi),%r14
+   0xffffffff812fe02e <+46>:    mov    0x10(%rdi),%rdi
+   0xffffffff812fe032 <+50>:    test   %rdi,%rdi
+   0xffffffff812fe035 <+53>:    je     0xffffffff812fe043 <elv_merge+67>
+   0xffffffff812fe037 <+55>:    mov    %rdx,%rsi
+   0xffffffff812fe03a <+58>:    callq  0xffffffff812fdd10 <elv_rq_merge_ok>
+   0xffffffff812fe03f <+63>:    test   %al,%al
+   0xffffffff812fe041 <+65>:    jne    0xffffffff812fe0a8 <elv_merge+168>
+   0xffffffff812fe043 <+67>:    mov    0x450(%rbx),%rax
+   0xffffffff812fe04a <+74>:    test   $0x80,%ah
+   0xffffffff812fe04d <+77>:    je     0xffffffff812fe060 <elv_merge+96>
+   0xffffffff812fe04f <+79>:    xor    %eax,%eax
+   0xffffffff812fe051 <+81>:    add    $0x8,%rsp
+   0xffffffff812fe055 <+85>:    pop    %rbx
+   0xffffffff812fe056 <+86>:    pop    %r12
+   0xffffffff812fe058 <+88>:    pop    %r13
+   0xffffffff812fe05a <+90>:    pop    %r14
+   0xffffffff812fe05c <+92>:    pop    %r15
+   0xffffffff812fe05e <+94>:    pop    %rbp
+   0xffffffff812fe05f <+95>:    retq   
+   0xffffffff812fe060 <+96>:    mov    0x20(%r12),%rsi
+   0xffffffff812fe065 <+101>:   mov    0x18(%rbx),%rdi
+   0xffffffff812fe069 <+105>:   callq  0xffffffff812fdd50 <elv_rqhash_find>
+   0xffffffff812fe06e <+110>:   test   %rax,%rax
+   0xffffffff812fe071 <+113>:   mov    %rax,%r15
+   0xffffffff812fe074 <+116>:   je     0xffffffff812fe0c8 <elv_merge+200>
+   0xffffffff812fe076 <+118>:   mov    %r12,%rsi
+   0xffffffff812fe079 <+121>:   mov    %rax,%rdi
+   0xffffffff812fe07c <+124>:   callq  0xffffffff812fdd10 <elv_rq_merge_ok>
+   0xffffffff812fe081 <+129>:   test   %al,%al
+   0xffffffff812fe083 <+131>:   je     0xffffffff812fe0c8 <elv_merge+200>
+   0xffffffff812fe085 <+133>:   mov    %r15,0x0(%r13)
+   0xffffffff812fe089 <+137>:   add    $0x8,%rsp
+   0xffffffff812fe08d <+141>:   mov    $0x2,%eax
+   0xffffffff812fe092 <+146>:   pop    %rbx
+   0xffffffff812fe093 <+147>:   pop    %r12
+   0xffffffff812fe095 <+149>:   pop    %r13
+   0xffffffff812fe097 <+151>:   pop    %r14
+   0xffffffff812fe099 <+153>:   pop    %r15
+   0xffffffff812fe09b <+155>:   pop    %rbp
+   0xffffffff812fe09c <+156>:   retq   
+   0xffffffff812fe09d <+157>:   nopl   (%rax)
+   0xffffffff812fe0a0 <+160>:   xor    %eax,%eax
+   0xffffffff812fe0a2 <+162>:   retq   
+   0xffffffff812fe0a3 <+163>:   nopl   0x0(%rax,%rax,1)
+   0xffffffff812fe0a8 <+168>:   mov    0x10(%rbx),%rdi
+   0xffffffff812fe0ac <+172>:   mov    %r12,%rsi
+   0xffffffff812fe0af <+175>:   callq  0xffffffff8130a7d0 <blk_try_merge>
+   0xffffffff812fe0b4 <+180>:   test   %eax,%eax
+   0xffffffff812fe0b6 <+182>:   je     0xffffffff812fe043 <elv_merge+67>
+   0xffffffff812fe0b8 <+184>:   mov    0x10(%rbx),%rdx
+   0xffffffff812fe0bc <+188>:   mov    %rdx,0x0(%r13)
+   0xffffffff812fe0c0 <+192>:   jmp    0xffffffff812fe051 <elv_merge+81>
+   0xffffffff812fe0c2 <+194>:   nopw   0x0(%rax,%rax,1)
+   0xffffffff812fe0c8 <+200>:   mov    (%r14),%rax
+   0xffffffff812fe0cb <+203>:   mov    0x8(%rax),%rax
+   0xffffffff812fe0cf <+207>:   test   %rax,%rax
+   0xffffffff812fe0d2 <+210>:   je     0xffffffff812fe04f <elv_merge+79>
+   0xffffffff812fe0d8 <+216>:   mov    %r12,%rdx
+   0xffffffff812fe0db <+219>:   mov    %r13,%rsi
+   0xffffffff812fe0de <+222>:   mov    %rbx,%rdi
+   0xffffffff812fe0e1 <+225>:   callq  *%rax
+   0xffffffff812fe0e3 <+227>:   jmpq   0xffffffff812fe051 <elv_merge+81>
+End of assembler dump.
+
