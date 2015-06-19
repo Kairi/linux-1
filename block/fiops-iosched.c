@@ -407,8 +407,7 @@ fiops_find_rq_fmerge(struct fiops_data *fiopsd, struct bio *bio)
 	return NULL;
 }
 
-static int fiops_merge(struct request_queue *q, struct request **req,
-		     struct bio *bio)
+static int fiops_merge(struct request_queue *q, struct request **req, struct bio *bio)
 {
 	struct fiops_data *fiopsd = q->elevator->elevator_data;
 	struct request *__rq;
@@ -418,7 +417,7 @@ static int fiops_merge(struct request_queue *q, struct request **req,
 		*req = __rq;
 		return ELEVATOR_FRONT_MERGE;
 	}
-
+	*req = __rq; // tmp
 	return ELEVATOR_NO_MERGE;
 }
 
@@ -494,19 +493,21 @@ static int fiops_init_queue(struct request_queue *q, struct elevator_type *e)
 	if(!eq)
 		return -ENOMEM;
 
-	fiopsd = kzalloc_node(sizeof(*fiopsd), GFP_KERNEL, q->node);
+	//fiopsd = kzalloc_node(sizeof(*fiopsd), GFP_KERNEL, q->node);
+	fiopsd = kmalloc_node(sizeof(*fiopsd), GFP_KERNEL, q->node);
 	if (!fiopsd) {
 		kobject_put(&eq->kobj);	
 		return -ENOMEM;
 	}
 
 	eq->elevator_data = fiopsd;
-
 	spin_lock_irq(q->queue_lock);
 	fiopsd->queue = q;
 	fiopsd->service_tree = FIOPS_RB_ROOT;
-	INIT_WORK(&fiopsd->unplug_work, fiops_kick_queue);
 	spin_unlock_irq(q->queue_lock);
+	
+	INIT_WORK(&fiopsd->unplug_work, fiops_kick_queue);
+
 
 	return 0;
 }

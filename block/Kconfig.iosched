@@ -38,8 +38,14 @@ config IOSCHED_LB
 	  Requests are kept in priority queues. Dispatching is done in a RR
 	  manner when the dispatch quantum for each queue is calculated
 	  according to queue priority.
-	  Most suitable for mobile devices.	  
+	  Most suitable for mobile devices.
 
+config IOSCHED_FIFO
+	tristate "Really Do Nothing Scheduler(FIFO)"
+	---help---
+	The FIFO Scheduler do Nothing.
+	No Merge and No Sort.
+	
 config IOSCHED_SIO
 	bool
 	default y

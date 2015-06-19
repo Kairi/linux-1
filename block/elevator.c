@@ -450,7 +450,7 @@ int elv_merge(struct request_queue *q, struct request **req, struct bio *bio)
 		return ELEVATOR_BACK_MERGE;
 	}
 
-	if (e->type->ops.elevator_merge_fn)
+	if (e->type->ops.elevator_merge_fn) // kernel Oops
 		return e->type->ops.elevator_merge_fn(q, req, bio);
 
 	return ELEVATOR_NO_MERGE;
