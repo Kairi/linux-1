@@ -51,6 +51,12 @@ config IOSCHED_SIO
 	default y
 	---help---
 		Simple I/O scheduler.
+		
+config IOSCHED_SIOPLUS
+	bool
+	default y
+	---help---
+		Simple I/O scheduler plus.
 
 config IOSCHED_VR
 	bool

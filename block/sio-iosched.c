@@ -53,7 +53,6 @@ sio_merged_requests(struct request_queue *q, struct request *rq, struct request 
 	 * If next expires before rq, assign its expire time to rq
 	 * and move into next position (next will be deleted) in fifo.
 	 */
-	printk(KERN_DEBUG "sio_merged_requests");
 	if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist)) {
 		if (time_before(next->fifo_time, rq->fifo_time)){
 			list_move(&rq->queuelist, &next->queuelist);
@@ -64,7 +63,7 @@ sio_merged_requests(struct request_queue *q, struct request *rq, struct request 
 	/*
 	 Delete next request.
 	*/
-	rq_fifo_clear(next); //	#define rq_fifo_clear(rq)       list_del_init(&(rq)->queuelist)
+	rq_fifo_clear(next);
 }
 
 static void
@@ -73,7 +72,6 @@ sio_add_request(struct request_queue *q, struct request *rq)
 	struct sio_data *sd = q->elevator->elevator_data;
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
-	printk(KERN_DEBUG "sio_add_request");
 	/*
 	 * Add request to the proper fifo list and set its
 	 * expire time.
@@ -89,12 +87,11 @@ sio_expired_request(struct sio_data *sd, int sync, int data_dir)
 	struct list_head *list = &sd->fifo_list[sync][data_dir];
 	struct request *rq;
 
-	printk(KERN_DEBUG "sio_expired_request");
 	if (list_empty(list))
 		return NULL;
 
 	/* Retrieve request */
-	rq = rq_entry_fifo(list->next); // #define rq_entry_fifo(ptr)	list_entry((ptr), struct request, queuelist)
+	rq = rq_entry_fifo(list->next); 
 
 	/* Request has expired */
 	if (time_after(jiffies, rq->fifo_time)) // time_after(a,b) returns true if the time a is after time b.
@@ -108,7 +105,7 @@ static struct request *
 sio_choose_expired_request(struct sio_data *sd)
 {
 	struct request *rq;
-	printk(KERN_DEBUG "sio_choose_expired_request");
+
 	/*
 	 * Check expired requests.
 	 * Asynchronous requests have priority over synchronous.
@@ -136,7 +133,7 @@ sio_choose_request(struct sio_data *sd, int data_dir)
 {
 	struct list_head *sync = sd->fifo_list[SYNC];
 	struct list_head *async = sd->fifo_list[ASYNC];
-	printk(KERN_DEBUG "sio_choose_request");
+	
 	/*
 	 * Retrieve request from available fifo list.
 	 * Synchronous requests have priority over asynchronous.
@@ -162,7 +159,6 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 	 * Remove the request from the fifo list
 	 * and dispatch it.
 	 */
-	printk(KERN_DEBUG "sio_dispatch_request");
 	rq_fifo_clear(rq);
 	elv_dispatch_add_tail(rq->q, rq);
 
@@ -186,8 +182,6 @@ sio_dispatch_requests(struct request_queue *q, int force)
 	struct sio_data *sd = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
-
-	printk(KERN_DEBUG "sio_dispatch_requests");
 
 	/*
 	 * Retrieve any expired request after a batch of
@@ -221,7 +215,6 @@ sio_former_request(struct request_queue *q, struct request *rq)
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 
-	printk(KERN_DEBUG "sio_former_request");
 	if (rq->queuelist.prev == &sd->fifo_list[sync][data_dir])
 		return NULL;
 
@@ -236,7 +229,6 @@ sio_latter_request(struct request_queue *q, struct request *rq)
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 
-	printk(KERN_DEBUG "sio_latter_request");
 	if (rq->queuelist.next == &sd->fifo_list[sync][data_dir])
 		return NULL;
 
@@ -263,7 +255,9 @@ static int sio_init_queue(struct request_queue *q, struct elevator_type *e)
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
 	}
+	
 	eq->elevator_data = sd;
+	/* Initialize fifo lists */
 	INIT_LIST_HEAD(&sd->fifo_list[SYNC][READ]);
 	INIT_LIST_HEAD(&sd->fifo_list[SYNC][WRITE]);
 	INIT_LIST_HEAD(&sd->fifo_list[ASYNC][READ]);
@@ -278,20 +272,16 @@ static int sio_init_queue(struct request_queue *q, struct elevator_type *e)
 	sd->fifo_expire[ASYNC][READ] = async_read_expire;
 	sd->fifo_expire[ASYNC][WRITE] = async_write_expire;
 	sd->fifo_batch = fifo_batch;
-	//q->elevator->elevator_data = sd;
 	spin_unlock_irq(q->queue_lock);
 
 	return 0;
 }
 
-/*
-  Finishalize
- */
 static void
 sio_exit_queue(struct elevator_queue *e)
 {
 	struct sio_data *sd = e->elevator_data;
-	printk(KERN_DEBUG "sio_exit_queue");
+
 	BUG_ON(!list_empty(&sd->fifo_list[SYNC][READ]));
 	BUG_ON(!list_empty(&sd->fifo_list[SYNC][WRITE]));
 	BUG_ON(!list_empty(&sd->fifo_list[ASYNC][READ]));

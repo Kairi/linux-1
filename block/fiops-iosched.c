@@ -10,7 +10,6 @@
 #include <linux/jiffies.h>
 #include <linux/rbtree.h>
 #include <linux/ioprio.h>
-//#include <linux/sched.h>
 #include <linux/blktrace_api.h>
 #include "blk.h"
 
