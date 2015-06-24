@@ -75,9 +75,9 @@ static const int queue_quantum[] = {
 
 /**
  * struct rowq_idling_data -  parameters for idling on the queue
- * @last_insert_time:time the last request was inserted
- *to the queue
- * @begin_idling:flag indicating wether we should idle
+ * @last_insert_time:	time the last request was inserted
+ *			to the queue
+ * @begin_idling:	flag indicating wether we should idle
  *
  */
 struct rowq_idling_data {
@@ -154,8 +154,7 @@ struct row_data {
 	unsigned int			cycle_flags;
 };
 
-//#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elevator_private[0]))
-#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elv.icq))
+#define RQ_ROWQ(rq) ((struct row_queue *) ((rq)->elv.priv[0]))
 
 #define row_log(q, fmt, args...)   \
 	blk_add_trace_msg(q, "%s():" fmt , __func__, ##args)
@@ -254,7 +253,6 @@ static void row_add_request(struct request_queue *q,
 
 	list_add_tail(&rq->queuelist, &rqueue->fifo);
 	rd->nr_reqs[rq_data_dir(rq)]++;
-	//rq_set_fifo_time(rq, jiffies); /* for statistics*/
 	rq->fifo_time = jiffies;
 
 	if (queue_idling_enabled[rqueue->prio]) {
@@ -441,21 +439,21 @@ done:
  */
 static int row_init_queue(struct request_queue *q, struct elevator_type *e)
 {
-	printk(KERN_DEBUG "row_init_queue");
+
 	struct row_data *rdata;
 	struct elevator_queue *eq;
 	int i;
+
 	eq = elevator_alloc(q, e);
 	if (!eq)
 		return -ENOMEM;
-
-	rdata = kmalloc_node(sizeof(*rdata), GFP_KERNEL | __GFP_ZERO, q->node);
+	
+	rdata = kzalloc_node(sizeof(*rdata), GFP_KERNEL, q->node);
 	if (!rdata) {
-		kobject_put(&eq->kobj);
+		kobject_put(&eq->kobj);		
 		return -ENOMEM;
 	}
-
-	eq->elevator_data = rdata;
+	
 
 	for (i = 0; i < ROWQ_MAX_PRIO; i++) {
 		INIT_LIST_HEAD(&rdata->row_queues[i].rqueue.fifo);
@@ -466,74 +464,33 @@ static int row_init_queue(struct request_queue *q, struct elevator_type *e)
 		rdata->row_queues[i].rqueue.idle_data.last_insert_time = ktime_set(0, 0);
 	}
 
+	eq->elevator_data = rdata;
+   
 	/*
 	 * Currently idling is enabled only for READ queues. If we want to
 	 * enable it for write queues also, note that idling frequency will
 	 * be the same in both cases
 	 */
-	spin_lock_irq(q->queue_lock);
+	spin_lock_irq(q->queue_lock);	
 	rdata->read_idle.idle_time = msecs_to_jiffies(ROW_IDLE_TIME_MSEC);
 	/* Maybe 0 on some platforms */
 	if (!rdata->read_idle.idle_time)
 		rdata->read_idle.idle_time = 1;
 	rdata->read_idle.freq = ROW_READ_FREQ_MSEC;
-	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work", WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work",
+					    WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
 	if (!rdata->read_idle.idle_workqueue)
 		panic("Failed to create idle workqueue\n");
 	INIT_DELAYED_WORK(&rdata->read_idle.idle_work, kick_queue);
+
 	rdata->curr_queue = ROWQ_PRIO_HIGH_READ;
 	rdata->dispatch_queue = q;
+
 	rdata->nr_reqs[READ] = rdata->nr_reqs[WRITE] = 0;
-	spin_unlock_irq(q->queue_lock);
-
+	q->elevator = eq;	
+	spin_unlock_irq(q->queue_lock);	
 	return 0;
-
 }
-
-// static void *row_init_queue(struct request_queue *q)
-// {
-//
-// 	struct row_data *rdata;
-// 	int i;
-//
-// 	rdata = kmalloc_node(sizeof(*rdata),
-// 			     GFP_KERNEL | __GFP_ZERO, q->node);
-// 	if (!rdata)
-// 		return NULL;
-//
-// 	for (i = 0; i < ROWQ_MAX_PRIO; i++) {
-// 		INIT_LIST_HEAD(&rdata->row_queues[i].rqueue.fifo);
-// 		rdata->row_queues[i].disp_quantum = queue_quantum[i];
-// 		rdata->row_queues[i].rqueue.rdata = rdata;
-// 		rdata->row_queues[i].rqueue.prio = i;
-// 		rdata->row_queues[i].rqueue.idle_data.begin_idling = false;
-// 		rdata->row_queues[i].rqueue.idle_data.last_insert_time =
-// 			ktime_set(0, 0);
-// 	}
-//
-// 	/*
-// 	 * Currently idling is enabled only for READ queues. If we want to
-// 	 * enable it for write queues also, note that idling frequency will
-// 	 * be the same in both cases
-// 	 */
-// 	rdata->read_idle.idle_time = msecs_to_jiffies(ROW_IDLE_TIME_MSEC);
-// 	/* Maybe 0 on some platforms */
-// 	if (!rdata->read_idle.idle_time)
-// 		rdata->read_idle.idle_time = 1;
-// 	rdata->read_idle.freq = ROW_READ_FREQ_MSEC;
-// 	rdata->read_idle.idle_workqueue = alloc_workqueue("row_idle_work",
-// 					    WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
-// 	if (!rdata->read_idle.idle_workqueue)
-// 		panic("Failed to create idle workqueue\n");
-// 	INIT_DELAYED_WORK(&rdata->read_idle.idle_work, kick_queue);
-//
-// 	rdata->curr_queue = ROWQ_PRIO_HIGH_READ;
-// 	rdata->dispatch_queue = q;
-//
-// 	rdata->nr_reqs[READ] = rdata->nr_reqs[WRITE] = 0;
-//
-// 	return rdata;
-// }
 
 /*
  * row_exit_queue() - called on unloading the RAW scheduler
@@ -564,8 +521,7 @@ static void row_merged_requests(struct request_queue *q, struct request *rq,
 {
 	struct row_queue   *rqueue = RQ_ROWQ(next);
 
-	//list_del_init(&next->queuelist);
-	rq_fifo_clear(next);
+	list_del_init(&next->queuelist);
 
 	rqueue->rdata->nr_reqs[rq_data_dir(rq)]--;
 }
@@ -600,16 +556,15 @@ static enum row_queue_prio get_queue_type(struct request *rq)
  * @gfp_mask:	ignored
  *
  */
-
 static int
-row_set_request(struct request_queue *q, struct request *rq, struct bio *bio,  gfp_t gfp_mask)
+row_set_request(struct request_queue *q, struct request *rq, struct bio *bio, gfp_t gfp_mask)
 {
 	struct row_data *rd = (struct row_data *)q->elevator->elevator_data;
 	unsigned long flags;
 
 	spin_lock_irqsave(q->queue_lock, flags);
-	//rq->elevator_private[0] =	(void *)(&rd->row_queues[get_queue_type(rq)]);
-	rq->elv.icq = (void *)(&rd->row_queues[get_queue_type(rq)]);
+	rq->elv.priv[0] =
+		(void *)(&rd->row_queues[get_queue_type(rq)]);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 
 	return 0;
@@ -719,10 +674,10 @@ static struct elevator_type iosched_row = {
 		.elevator_merge_req_fn		= row_merged_requests,
 		.elevator_dispatch_fn		= row_dispatch_requests,
 		.elevator_add_req_fn		= row_add_request,
-		.elevator_former_req_fn	= elv_rb_former_request,
-		.elevator_latter_req_fn	= elv_rb_latter_request,
+		.elevator_former_req_fn		= elv_rb_former_request,
+		.elevator_latter_req_fn		= elv_rb_latter_request,
 		.elevator_set_req_fn		= row_set_request,
-		.elevator_init_fn           = row_init_queue,
+		.elevator_init_fn		= row_init_queue,
 		.elevator_exit_fn		= row_exit_queue,
 	},
 
