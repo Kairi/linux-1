@@ -97,6 +97,15 @@ config IOSCHED_FIOPS
           IOPS equally among all processes in the system. It's mainly for
           Flash based storage.
 
+config IOSCHED_TPPS
+	tristate "TPPS I/O scheduler"
+	# If BLK_CGROUP is a module, TPPS has to be built as module.
+	default y
+	---help---
+	  The TPPS I/O scheduler tries to distribute iops proportional
+	  among all cgroups in the system. It should also provide a low
+	  latency working environment, suitable for flash-based device.
+
 choice
 	prompt "Default I/O scheduler"
 	default DEFAULT_CFQ
@@ -116,6 +125,9 @@ choice
 		  Dispatching is done in a RR manner when the dispatch quantum
 		  for each queue is defined according to queue priority.
 		  Most suitable for mobile devices.
+
+	config DEFAULT_TPPS
+		bool "Tiny Parallel Proportion" if IOSCHED_TPPS=y
 
 	config DEFAULT_CFQ
 		bool "CFQ" if IOSCHED_CFQ=y

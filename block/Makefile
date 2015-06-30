@@ -25,6 +25,7 @@ obj-$(CONFIG_IOSCHED_ZEN)	+= zen-iosched.o
 obj-$(CONFIG_IOSCHED_FIOPS)	+= fiops-iosched.o
 obj-$(CONFIG_IOSCHED_LB)	+= lb-iosched.o
 obj-$(CONFIG_IOSCHED_FIFO)	+= fifo-iosched.o
+obj-$(CONFIG_IOSCHED_TPPS)	+= tpps-iosched.o
 
 
 obj-$(CONFIG_BLOCK_COMPAT)	+= compat_ioctl.o
