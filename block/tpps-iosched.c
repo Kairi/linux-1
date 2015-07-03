@@ -17,6 +17,9 @@
 
 static struct kmem_cache *tpps_pool;
 
+// tpps_queue -> tpps_group
+//            -> tppg_node 
+
 struct tpps_queue {
 	/* reference count */
 	int ref;
@@ -51,8 +54,11 @@ struct tppg_stats {
 	struct blkg_stat		time;
 };
 
+/* This is per cgroup per device grouping structure */
 struct tpps_group {
+	/* must be the first member */
 	struct blkg_policy_data pd;
+	
 	/* tpps_data member */
 	struct list_head tppd_node;
 	struct list_head *cur_dispatcher;
@@ -1129,6 +1135,7 @@ static struct cftype tpps_blkcg_files[] = {
 	{ }	/* terminate */
 };
 
+// operation
 static void tpps_pd_init(struct blkcg_gq *blkg)
 {
 	struct tpps_group *tppg = blkg_to_tppg(blkg);
@@ -1227,9 +1234,10 @@ static void tpps_pd_reset_stats(struct blkcg_gq *blkg)
 }
 
 static struct blkcg_policy blkcg_policy_tpps = {
-	.pd_size			= sizeof(struct tpps_group),
-	.cftypes			= tpps_blkcg_files,
-	.pd_init_fn			= tpps_pd_init,
+	.pd_size			= sizeof(struct tpps_group), //policy specific private data size
+	.cftypes			= tpps_blkcg_files, // cgroup files for the policy
+	/* operations */
+	.pd_init_fn			= tpps_pd_init, 
 	.pd_offline_fn		= tpps_pd_offline,
 	.pd_reset_stats_fn	= tpps_pd_reset_stats,
 };
@@ -1239,7 +1247,7 @@ static int __init tpps_init(void)
 {
 	int ret;
 
-	ret = blkcg_policy_register(&blkcg_policy_tpps);
+	ret = blkcg_policy_register(&blkcg_policy_tpps); 
 	if (ret)
 		return ret;
 
