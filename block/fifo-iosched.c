@@ -51,6 +51,7 @@ static int fifo_init_queue(struct request_queue *q, struct elevator_type *e)
 	}
 
 	eq->elevator_data = fd;
+	
 	INIT_LIST_HEAD(&fd->queue);
 
 	spin_lock_irq(q->queue_lock);

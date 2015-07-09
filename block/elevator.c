@@ -371,7 +371,7 @@ void elv_dispatch_sort(struct request_queue *q, struct request *rq)
 		struct request *pos = list_entry_rq(entry);
 
 		if ((rq->cmd_flags & REQ_DISCARD) !=
-		    (pos->cmd_flags & REQ_DISCARD))
+		    (pos->cmd_flags & REQ_DISCARD)) // request to discard sectors
 			break;
 		if (rq_data_dir(rq) != rq_data_dir(pos))
 			break;

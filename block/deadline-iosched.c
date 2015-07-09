@@ -175,7 +175,7 @@ deadline_merged_requests(struct request_queue *q, struct request *req,
 	 */
 	if (!list_empty(&req->queuelist) && !list_empty(&next->queuelist)) {
 		if (time_before(next->fifo_time, req->fifo_time)) {
-			list_move(&req->queuelist, &next->queuelist);
+			list_move(&req->queuelist, &next->queuelist); // req->queuelist:the entry to move, next->queuelist:the head that will precede our entry
 			req->fifo_time = next->fifo_time;
 		}
 	}
@@ -256,7 +256,7 @@ static int deadline_dispatch_requests(struct request_queue *q, int force)
 	else
 		rq = dd->next_rq[READ];
 
-	if (rq && dd->batching < dd->fifo_batch)
+	if (rq && dd->batching < dd->fifo_batch) // exist request && NOT Excess batch limit.
 		/* we have a next request are still entitled to batch */
 		goto dispatch_request;
 

@@ -52,6 +52,27 @@ struct tppg_stats {
 	struct blkg_stat		sectors;
 	/* total disk time and nr sectors dispatched by this group */
 	struct blkg_stat		time;
+#ifdef CONFIG_DEBUG_BLK_CGROUP
+	/* time not charged to this cgroup */
+	struct blkg_stat		unaccounted_time;
+	/* sum of number of ios queued across all samples */
+	struct blkg_stat		avg_queue_size_sum;
+	/* count of samples taken for average */
+	struct blkg_stat		avg_queue_size_samples;
+	/* how many times this group has been removed from service tree */
+	struct blkg_stat		dequeue;
+	/* total time spent waiting for it to be assigned a timeslice. */
+	struct blkg_stat		group_wait_time;
+	/* time spent idling for this blkcg_gq */
+	struct blkg_stat		idle_time;
+	/* total time with empty current active q with other requests queued */
+	struct blkg_stat		empty_time;
+	/* fields after this shouldn't be cleared on stat reset */
+	uint64_t			start_group_wait_time;
+	uint64_t			start_idle_time;
+	uint64_t			start_empty_time;
+	uint16_t			flags;
+#endif	/* CONFIG_DEBUG_BLK_CGROUP */
 };
 
 /* This is per cgroup per device grouping structure */
@@ -1135,6 +1156,29 @@ static struct cftype tpps_blkcg_files[] = {
 	{ }	/* terminate */
 };
 
+
+static void tppg_stats_init(struct tppg_stats *stats)
+{
+	blkg_rwstat_init(&stats->service_bytes);
+	blkg_rwstat_init(&stats->serviced);
+	blkg_rwstat_init(&stats->merged);
+	blkg_rwstat_init(&stats->service_time);
+	blkg_rwstat_init(&stats->wait_time);
+	blkg_rwstat_init(&stats->queued);
+
+	blkg_stat_init(&stats->sectors);
+	blkg_stat_init(&stats->time);
+
+#ifdef CONFIG_DEBUG_BLK_CGROUP
+	blkg_stat_init(&stats->unaccounted_time);
+	blkg_stat_init(&stats->avg_queue_size_sum);
+	blkg_stat_init(&stats->avg_queue_size_samples);
+	blkg_stat_init(&stats->dequeue);
+	blkg_stat_init(&stats->group_wait_time);
+	blkg_stat_init(&stats->idle_time);
+	blkg_stat_init(&stats->empty_time);
+#endif
+}
 // operation
 static void tpps_pd_init(struct blkcg_gq *blkg)
 {
@@ -1143,6 +1187,9 @@ static void tpps_pd_init(struct blkcg_gq *blkg)
 	tpps_init_tppg_base(tppg);
 	tppg->weight = blkg->blkcg->cfq_weight;
 	tppg->leaf_weight = blkg->blkcg->cfq_leaf_weight;
+	// TMP
+	tppg_stats_init(&tppg->stats);
+	tppg_stats_init(&tppg->dead_stats);
 }
 
 static inline struct tpps_group *tppg_parent(struct tpps_group *tppg)
@@ -1151,6 +1198,9 @@ static inline struct tpps_group *tppg_parent(struct tpps_group *tppg)
 
 	return pblkg ? blkg_to_tppg(pblkg) : NULL;
 }
+
+
+
 
 static void tppg_stats_reset(struct tppg_stats *stats)
 {
@@ -1161,7 +1211,7 @@ static void tppg_stats_reset(struct tppg_stats *stats)
 	blkg_rwstat_reset(&stats->service_time);
 	blkg_rwstat_reset(&stats->wait_time);
 	blkg_stat_reset(&stats->time);
-#ifdef CONFIG_DEBUG_BLK_CGROUP
+#ifdef CONFIG_DEBUG_BLK_CGROUP //if enabled... error why?
 	blkg_stat_reset(&stats->unaccounted_time);
 	blkg_stat_reset(&stats->avg_queue_size_sum);
 	blkg_stat_reset(&stats->avg_queue_size_samples);
