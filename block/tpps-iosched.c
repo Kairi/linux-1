@@ -1292,7 +1292,8 @@ static struct blkcg_policy blkcg_policy_tpps = {
 	.pd_reset_stats_fn	= tpps_pd_reset_stats,
 };
 
-// MEMO:reference to cfq-iosched.c __init
+// MEMO:reference to cfq-iosched.c __init :OK
+// register ( blkcg policy -> kmem cache -> elevator )
 static int __init tpps_init(void)
 {
 	int ret;
@@ -1319,6 +1320,7 @@ err_pol_unreg:
 	return ret;
 }
 
+// free ( blkcg policy -> elevator ->  kmem cache )
 static void __exit tpps_exit(void)
 {
 	blkcg_policy_unregister(&blkcg_policy_tpps);
