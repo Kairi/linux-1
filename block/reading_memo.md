@@ -2,6 +2,9 @@
 * Block I/O Controller
 Block I/O Controller is Cgroup Subsystem which has benn included into Linux Kernel since v2.6.33
 
+#TODO
+research NCQ(native commnad queueing) and RAID Controller.
+
 ** Build Option
 - BLOCK
 Enable The Block Layer

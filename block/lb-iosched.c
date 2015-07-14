@@ -1,3 +1,20 @@
+/*
+  LB(Logical Block Bundling) I/O Scheduler arrange write requests into bundles the size of a logical block so that write requests falling in a logical block belong to the same
+  bundle.
+  Two fundamental policy.
+  1. Time-Gut-Bundling
+  2. Selective Bundling
+
+  In order to prevent worst case, this deals synchronous request as soon as possible.
+
+  We can explain dispatching policy by three main routes. 
+  1. dispatch a bundle of requests if it reaches a LB size.
+  2. dispatch a request of synchronous group immediately 
+  since these requests possibly block other requests.
+  3. give each request check-point-time. This check-point-time guarantees that
+  each request have convincible deadline that prevents from 
+  being continuously waiting for additional requests to be reach LB size.
+ */
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
 #include <linux/bio.h>
@@ -7,6 +24,9 @@
 #include <linux/version.h>
 
 enum { ASYNC, SYNC };
+
+// MEMO: HZ:time interruption num per second.
+// So, jiffies + HZ means one second later.
 
 /* Tunables */
 static const int sync_read_expire = (HZ / 16) * 5;	/* max time before a sync read is submitted. */
@@ -19,7 +39,7 @@ static const int writes_starved = 2;		/* max times reads can starve a write */
 static const int async_reads_starved = 4;	/* max times sync reads can starve async reads */
 static const int fifo_batch     = 1;		/* # of sequential requests treated as one by the above parameters. For throughput. */
 
-static const int fifo_size = 4096; // default bundling size
+static const int lb_size = 4096; // default bundling size
 
 
 /* Elevator data */
@@ -30,16 +50,18 @@ struct lb_data {
 	unsigned int batched;
 	unsigned int starved;
 	unsigned int reads_starved;
+	unsigned int fifo_size[2][2]; // for logical bundling
 
 	/* Settings */
 	int fifo_expire[2][2];
 	int fifo_batch;
 	int writes_starved;
 	int async_reads_starved;
-	int fifo_size[2][2]; // for logical bundling
-	
+	int lb_size;	
 };
 
+
+// NOT edited from sio
 static void
 lb_merged_requests(struct request_queue *q, struct request *rq,
 		    struct request *next)
@@ -61,6 +83,7 @@ lb_merged_requests(struct request_queue *q, struct request *rq,
 
 
 // add req to queue along with request type.
+// Add fifo size initialization.
 static void
 lb_add_request(struct request_queue *q, struct request *rq)
 {
@@ -70,10 +93,10 @@ lb_add_request(struct request_queue *q, struct request *rq)
 
 	/*
 	 * Add request to the proper fifo list and set its
-	 * expire time.
+	 * expire time and fifo size.
 	 */
 	rq->fifo_time = jiffies + ld->fifo_expire[sync][data_dir];
-	ld->fifo_size[sync][data_dir] = blk_rq_size(rq);
+	ld->fifo_size[sync][data_dir] = blk_rq_bytes(rq); 
 	list_add_tail(&rq->queuelist, &ld->fifo_list[sync][data_dir]);
 }
 
@@ -187,6 +210,32 @@ lb_dispatch_request(struct lb_data *ld, struct request *rq)
 	}
 }
 
+// 
+static struct request *
+lb_bundled_request(struct lb_data *ld) 
+{
+	struct list_head *async_write_list = &ld->fifo_list[ASYNC][WRITE]; // only async && write 
+	struct request *rq;
+
+	if (list_empty(async_write_list))
+		return NULL;
+
+	/* Retrieve request */
+	rq = rq_entry_fifo(async_write_list->next);
+
+	/* Request has bundled */
+	if (blk_rq_bytes(rq) > lb_size) {
+		printk("KERN_DEBUG bundled!\n");
+		printk("KERN_DEBUG blk_rq_bytes():%d", blk_rq_bytes(rq));		
+		return rq; // when finish bundling
+	}
+	
+
+	return NULL;
+}
+
+
+// registerd to elevator _dispatch_fn
 static int
 lb_dispatch_requests(struct request_queue *q, int force)
 {
@@ -194,14 +243,19 @@ lb_dispatch_requests(struct request_queue *q, int force)
 	struct request *rq = NULL;
 	int data_dir = READ;
 
+	rq = lb_bundled_request(ld);
+	
 	/*
 	 * Retrieve any expired request after a batch of
 	 * sequential requests.
 	 */
-	if (ld->batched > ld->fifo_batch) {
-		ld->batched = 0;
-		rq = lb_choose_expired_request(ld);
+	if(!rq) {
+		if (ld->batched > ld->fifo_batch) {
+			ld->batched = 0;
+			rq = lb_choose_expired_request(ld);
+		}
 	}
+	
 
 	/* Retrieve request */
 	if (!rq) {
@@ -219,6 +273,7 @@ lb_dispatch_requests(struct request_queue *q, int force)
 	return 1;
 }
 
+// NOT be edited from sioplus-iosched.c
 static struct request *
 lb_former_request(struct request_queue *q, struct request *rq)
 {
@@ -233,6 +288,8 @@ lb_former_request(struct request_queue *q, struct request *rq)
 	return list_entry(rq->queuelist.prev, struct request, queuelist);
 }
 
+
+// NOT be edited from sioplus-iosched.c
 static struct request *
 lb_latter_request(struct request_queue *q, struct request *rq)
 {
@@ -247,6 +304,14 @@ lb_latter_request(struct request_queue *q, struct request *rq)
 	return list_entry(rq->queuelist.next, struct request, queuelist);
 }
 
+// add NOT allow merge function
+static int lb_allow_merge(struct request_queue *q, struct request *rq, struct bio *bio) 
+{
+	return ELEVATOR_NO_MERGE;
+}
+
+
+// Add fifo size Initialization from sioplus-iosched.c.
 static int lb_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	struct lb_data *ld;
@@ -276,6 +341,10 @@ static int lb_init_queue(struct request_queue *q, struct elevator_type *e)
 	ld->batched = 0;
 	ld->starved = 0;
 	ld->reads_starved = 0;
+	ld->fifo_size[SYNC][READ] = 0;
+	ld->fifo_size[SYNC][WRITE] = 0;
+	ld->fifo_size[ASYNC][READ] = 0;
+	ld->fifo_size[ASYNC][WRITE] = 0;
 	ld->fifo_expire[SYNC][READ] = sync_read_expire;
 	ld->fifo_expire[SYNC][WRITE] = sync_write_expire;
 	ld->fifo_expire[ASYNC][READ] = async_read_expire;
@@ -337,6 +406,7 @@ SHOW_FUNCTION(lb_async_write_expire_show, ld->fifo_expire[ASYNC][WRITE], 1);
 SHOW_FUNCTION(lb_fifo_batch_show, ld->fifo_batch, 0);
 SHOW_FUNCTION(lb_writes_starved_show, ld->writes_starved, 0);
 SHOW_FUNCTION(lb_async_reads_starved_show, ld->async_reads_starved, 0);
+SHOW_FUNCTION(lb_lb_size_show, ld->lb_size, 0);
 #undef SHOW_FUNCTION
 
 #define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
@@ -362,6 +432,7 @@ STORE_FUNCTION(lb_async_write_expire_store, &ld->fifo_expire[ASYNC][WRITE], 0, I
 STORE_FUNCTION(lb_fifo_batch_store, &ld->fifo_batch, 0, INT_MAX, 0);
 STORE_FUNCTION(lb_writes_starved_store, &ld->writes_starved, 0, INT_MAX, 0);
 STORE_FUNCTION(lb_async_reads_starved_store, &ld->async_reads_starved, 0, INT_MAX, 0);
+STORE_FUNCTION(lb_lb_size_store, &ld->lb_size, 0, INT_MAX, 0);
 #undef STORE_FUNCTION
 
 #define DD_ATTR(name) \
@@ -376,6 +447,7 @@ static struct elv_fs_entry lb_attrs[] = {
 	DD_ATTR(fifo_batch),
 	DD_ATTR(writes_starved),
 	DD_ATTR(async_reads_starved),
+	DD_ATTR(lb_size),
 	__ATTR_NULL
 };
 
@@ -386,6 +458,7 @@ static struct elevator_type iosched_lb = {
 		.elevator_add_req_fn		= lb_add_request,
 		.elevator_former_req_fn		= lb_former_request,
 		.elevator_latter_req_fn		= lb_latter_request,
+		.elevator_allow_merge_fn = lb_allow_merge,
 		.elevator_init_fn		= lb_init_queue,
 		.elevator_exit_fn		= lb_exit_queue,
 	},
