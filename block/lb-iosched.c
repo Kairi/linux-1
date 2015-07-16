@@ -1,11 +1,13 @@
 /*
-  LB(Logical Block Bundling) I/O Scheduler arrange write requests into bundles the size of a logical block so that write requests falling in a logical block belong to the same
-  bundle.
+  LB(Logical Block Bundling) I/O Scheduler arrange asyncronous write requests
+  into bundles the size of a logical block so that write requests falling in
+  a logical block belong to the same bundle.
   Two fundamental policy.
   1. Time-Gut-Bundling
   2. Selective Bundling
 
-  In order to prevent worst case, this deals synchronous request as soon as possible.
+  In order to prevent worst case, this I/O scheduler deals synchronous request
+  ASAP.
 
   We can explain dispatching policy by three main routes. 
   1. dispatch a bundle of requests if it reaches a LB size.
@@ -25,9 +27,6 @@
 
 enum { ASYNC, SYNC };
 
-// MEMO: HZ:time interruption num per second.
-// So, jiffies + HZ means one second later.
-
 /* Tunables */
 static const int sync_read_expire = (HZ / 16) * 5;	/* max time before a sync read is submitted. */
 static const int sync_write_expire = (HZ / 8) * 23;	/* max time before a sync write is submitted. */
@@ -39,7 +38,7 @@ static const int writes_starved = 2;		/* max times reads can starve a write */
 static const int async_reads_starved = 4;	/* max times sync reads can starve async reads */
 static const int fifo_batch     = 1;		/* # of sequential requests treated as one by the above parameters. For throughput. */
 
-static const int lb_size = 4096; // default bundling size
+static const int lb_size = 4096; /* default logical block size. */
 
 
 /* Elevator data */
@@ -50,18 +49,17 @@ struct lb_data {
 	unsigned int batched;
 	unsigned int starved;
 	unsigned int reads_starved;
-	unsigned int fifo_size[2][2]; // for logical bundling
+	unsigned int fifo_size[2][2]; /* bundled request size. */
 
 	/* Settings */
 	int fifo_expire[2][2];
 	int fifo_batch;
 	int writes_starved;
 	int async_reads_starved;
-	int lb_size;	
+	int lb_size; /* logical block size. */
 };
 
 
-// NOT edited from sio
 static void
 lb_merged_requests(struct request_queue *q, struct request *rq,
 		    struct request *next)
@@ -93,10 +91,10 @@ lb_add_request(struct request_queue *q, struct request *rq)
 
 	/*
 	 * Add request to the proper fifo list and set its
-	 * expire time and fifo size.
+	 * expire time and request size.
 	 */
 	rq->fifo_time = jiffies + ld->fifo_expire[sync][data_dir];
-	ld->fifo_size[sync][data_dir] = blk_rq_bytes(rq); 
+	ld->fifo_size[sync][data_dir] += blk_rq_bytes(rq); 
 	list_add_tail(&rq->queuelist, &ld->fifo_list[sync][data_dir]);
 }
 
@@ -210,27 +208,31 @@ lb_dispatch_request(struct lb_data *ld, struct request *rq)
 	}
 }
 
-// 
+ 
 static struct request *
 lb_bundled_request(struct lb_data *ld) 
 {
 	struct list_head *async_write_list = &ld->fifo_list[ASYNC][WRITE]; // only async && write 
 	struct request *rq;
-
+	
 	if (list_empty(async_write_list))
 		return NULL;
 
 	/* Retrieve request */
 	rq = rq_entry_fifo(async_write_list->next);
 
+	printk("KERN_DEBUG size:%d\n", ld->fifo_size[ASYNC][WRITE]);
 	/* Request has bundled */
-	if (blk_rq_bytes(rq) > lb_size) {
+	if (ld->fifo_size[ASYNC][WRITE] > lb_size) {
+		ld->fifo_size[ASYNC][WRITE] = 0;
 		printk("KERN_DEBUG bundled!\n");
-		printk("KERN_DEBUG blk_rq_bytes():%d", blk_rq_bytes(rq));		
+		printk("KERN_DEBUG blk_rq_bytes:%d", blk_rq_bytes(rq));
 		return rq; // when finish bundling
+	} else {
+		printk("KERN_DEBUG NOT bundled...\n");
+		printk("KERN_DEBUG blk_rq_bytes:%d", blk_rq_bytes(rq));
 	}
 	
-
 	return NULL;
 }
 
@@ -406,7 +408,7 @@ SHOW_FUNCTION(lb_async_write_expire_show, ld->fifo_expire[ASYNC][WRITE], 1);
 SHOW_FUNCTION(lb_fifo_batch_show, ld->fifo_batch, 0);
 SHOW_FUNCTION(lb_writes_starved_show, ld->writes_starved, 0);
 SHOW_FUNCTION(lb_async_reads_starved_show, ld->async_reads_starved, 0);
-SHOW_FUNCTION(lb_lb_size_show, ld->lb_size, 0);
+SHOW_FUNCTION(lb_lb_size_show, ld->lb_size, 0); 
 #undef SHOW_FUNCTION
 
 #define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
@@ -432,7 +434,7 @@ STORE_FUNCTION(lb_async_write_expire_store, &ld->fifo_expire[ASYNC][WRITE], 0, I
 STORE_FUNCTION(lb_fifo_batch_store, &ld->fifo_batch, 0, INT_MAX, 0);
 STORE_FUNCTION(lb_writes_starved_store, &ld->writes_starved, 0, INT_MAX, 0);
 STORE_FUNCTION(lb_async_reads_starved_store, &ld->async_reads_starved, 0, INT_MAX, 0);
-STORE_FUNCTION(lb_lb_size_store, &ld->lb_size, 0, INT_MAX, 0);
+STORE_FUNCTION(lb_lb_size_store, &ld->lb_size, 0, INT_MAX, 0); 
 #undef STORE_FUNCTION
 
 #define DD_ATTR(name) \
@@ -487,5 +489,5 @@ module_exit(lb_exit);
 
 MODULE_AUTHOR("Kairi OKUMURA");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Logical Bundling I/O Scheduler");
+MODULE_DESCRIPTION("Simple Logical Bundling I/O Scheduler");
 
