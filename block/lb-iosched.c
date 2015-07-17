@@ -221,20 +221,36 @@ lb_bundled_request(struct lb_data *ld)
 	/* Retrieve request */
 	rq = rq_entry_fifo(async_write_list->next);
 
-	printk("KERN_DEBUG size:%d\n", ld->fifo_size[ASYNC][WRITE]);
 	/* Request has bundled */
 	if (ld->fifo_size[ASYNC][WRITE] > lb_size) {
-		ld->fifo_size[ASYNC][WRITE] = 0;
-		printk("KERN_DEBUG bundled!\n");
-		printk("KERN_DEBUG blk_rq_bytes:%d", blk_rq_bytes(rq));
 		return rq; // when finish bundling
 	} else {
 		printk("KERN_DEBUG NOT bundled...\n");
-		printk("KERN_DEBUG blk_rq_bytes:%d", blk_rq_bytes(rq));
+		printk("KERN_DEBUG blk_rq_bytes:%d\n", blk_rq_bytes(rq));
+		printk("KERN_DEBUG fifo_size:%d\n", ld->fifo_size[ASYNC][WRITE]);
 	}
 	
 	return NULL;
 }
+
+static int lb_dispatch_bundle(struct lb_data *ld, struct request *rq)
+{
+	struct list_head *async_write_list = &ld->fifo_list[ASYNC][WRITE];
+
+	printk("KERN_DEBUG Bundled!\n");
+	printk("KERN_DEBUG fifo_size:%d\n", ld->fifo_size[ASYNC][WRITE]);
+	
+	do {
+		rq_fifo_clear(rq);
+		elv_dispatch_add_tail(rq->q, rq);
+		printk("KERN_DEBUG looping\n");
+		
+	} while ((rq = rq_entry_fifo(async_write_list->next)) && !rq);
+	
+	ld->fifo_size[ASYNC][WRITE] = 0;
+	return 1;
+}
+
 
 
 // registerd to elevator _dispatch_fn
@@ -246,6 +262,11 @@ lb_dispatch_requests(struct request_queue *q, int force)
 	int data_dir = READ;
 
 	rq = lb_bundled_request(ld);
+	if (rq) {
+		lb_dispatch_bundle(ld, rq);
+		return 1;
+	}
+	
 	
 	/*
 	 * Retrieve any expired request after a batch of
