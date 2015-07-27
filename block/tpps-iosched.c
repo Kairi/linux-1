@@ -28,11 +28,11 @@ struct tpps_queue {
 	/* tpps_group member */
 	struct list_head tppg_node;
 	/* sorted list of pending requests */
-	struct list_head sort_list;
+	struct list_head sort_list; // reqs
 	struct tpps_group *tppg;
 	pid_t pid;
 	int online;
-	int rq_queued;
+	int rq_queued; // req count
 };
 
 struct tppg_stats {

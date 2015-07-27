@@ -59,6 +59,22 @@ struct lb_data {
 	int lb_size; /* logical block size. */
 };
 
+static void lb_print_req_type(struct request *rq)
+{
+	const int sync = rq_is_sync(rq);
+	const int data_dir = rq_data_dir(rq);
+	if (sync && data_dir) {
+		printk("KERN_DEBUG req_type:sync write\n");
+	} else if(!sync && data_dir) {
+		printk("KERN_DEBUG req_type:async write\n");
+	} else if(sync && !data_dir) {
+		printk("KERN_DEBUG req_type:sync read\n");
+	} else {
+		printk("KERN_DEBUG req_type:async read\n");
+	}
+	printk("KERN_DEBUG rq syze:%d\n", blk_rq_bytes(rq));
+}
+
 
 static void
 lb_merged_requests(struct request_queue *q, struct request *rq,
@@ -74,7 +90,6 @@ lb_merged_requests(struct request_queue *q, struct request *rq,
 			rq->fifo_time = next->fifo_time;
 		}
 	}
-
 	/* Delete next request */
 	rq_fifo_clear(next);
 }
@@ -96,6 +111,7 @@ lb_add_request(struct request_queue *q, struct request *rq)
 	rq->fifo_time = jiffies + ld->fifo_expire[sync][data_dir];
 	ld->fifo_size[sync][data_dir] += blk_rq_bytes(rq); 
 	list_add_tail(&rq->queuelist, &ld->fifo_list[sync][data_dir]);
+	//lb_print_req_type(rq); // for trace
 }
 
 static struct request *
@@ -197,7 +213,7 @@ lb_dispatch_request(struct lb_data *ld, struct request *rq)
 	elv_dispatch_add_tail(rq->q, rq);
 
 	ld->batched++;
-	ld->fifo_size[sync][data_dir] += blk_rq_bytes(rq); //added
+	ld->fifo_size[sync][data_dir] -= blk_rq_bytes(rq); //added
 
 	if (rq_data_dir(rq)) {
 		ld->starved = 0;
@@ -208,45 +224,35 @@ lb_dispatch_request(struct lb_data *ld, struct request *rq)
 	}
 }
 
- 
-static struct request *
-lb_bundled_request(struct lb_data *ld) 
+// check bundled or not
+static int lb_check_bundled(struct lb_data *ld) 
 {
 	struct list_head *async_write_list = &ld->fifo_list[ASYNC][WRITE]; // only async && write 
-	struct request *rq;
 	
 	if (list_empty(async_write_list))
-		return NULL;
-
-	/* Retrieve request */
-	rq = rq_entry_fifo(async_write_list->next);
-
+		return 0;
+	
 	/* Request has bundled */
 	if (ld->fifo_size[ASYNC][WRITE] > lb_size) {
-		return rq; // when finish bundling
-	} else {
-		printk("KERN_DEBUG NOT bundled...\n");
-		printk("KERN_DEBUG blk_rq_bytes:%d\n", blk_rq_bytes(rq));
-		printk("KERN_DEBUG fifo_size:%d\n", ld->fifo_size[ASYNC][WRITE]);
+		printk("KERN_DEBUG Bundled!!!\n");
+		printk("KERN_DEBUG lb_size:%d fifo_size:%d\n", lb_size, ld->fifo_size[ASYNC][WRITE]);
+		return 1;
 	}
-	
-	return NULL;
+	printk("KERN_DEBUG NOT bundled...\n");
+	printk("KERN_DEBUG lb_size:%d fifo_size:%d\n", lb_size, ld->fifo_size[ASYNC][WRITE]);
+	return 0;
 }
 
 static int lb_dispatch_bundle(struct lb_data *ld, struct request *rq)
 {
 	struct list_head *async_write_list = &ld->fifo_list[ASYNC][WRITE];
-
-	printk("KERN_DEBUG Bundled!\n");
-	printk("KERN_DEBUG fifo_size:%d\n", ld->fifo_size[ASYNC][WRITE]);
 	
-	do {
+	while(!list_empty(async_write_list)) {
+		rq = rq_entry_fifo(async_write_list->next);
 		rq_fifo_clear(rq);
 		elv_dispatch_add_tail(rq->q, rq);
-		printk("KERN_DEBUG looping\n");
-		
-	} while ((rq = rq_entry_fifo(async_write_list->next)) && !rq);
-	
+	}
+
 	ld->fifo_size[ASYNC][WRITE] = 0;
 	return 1;
 }
@@ -260,13 +266,14 @@ lb_dispatch_requests(struct request_queue *q, int force)
 	struct lb_data *ld = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
+	int bundled;
 
-	rq = lb_bundled_request(ld);
-	if (rq) {
+	/* dispatch bundled queue */
+	bundled = lb_check_bundled(ld);
+	if (bundled) {
 		lb_dispatch_bundle(ld, rq);
 		return 1;
 	}
-	
 	
 	/*
 	 * Retrieve any expired request after a batch of
@@ -328,10 +335,12 @@ lb_latter_request(struct request_queue *q, struct request *rq)
 }
 
 // add NOT allow merge function
+/*
 static int lb_allow_merge(struct request_queue *q, struct request *rq, struct bio *bio) 
 {
 	return ELEVATOR_NO_MERGE;
 }
+*/
 
 
 // Add fifo size Initialization from sioplus-iosched.c.
@@ -481,7 +490,7 @@ static struct elevator_type iosched_lb = {
 		.elevator_add_req_fn		= lb_add_request,
 		.elevator_former_req_fn		= lb_former_request,
 		.elevator_latter_req_fn		= lb_latter_request,
-		.elevator_allow_merge_fn = lb_allow_merge,
+//		.elevator_allow_merge_fn = lb_allow_merge,
 		.elevator_init_fn		= lb_init_queue,
 		.elevator_exit_fn		= lb_exit_queue,
 	},

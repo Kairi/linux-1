@@ -75,6 +75,15 @@ config IOSCHED_CFQ
 
 	  This is the default I/O scheduler.
 
+config IOSCHED_CFQ
+	tristate "GFQ I/O scheduler"
+	default y
+	---help---
+	  The GFQ I/O scheduler tries to distribute bandwidth equally
+	  among all groups in the system. It should provide a fair
+	  and low latency working environment, suitable for both desktop
+	  and server systems.
+
 config CFQ_GROUP_IOSCHED
 	bool "CFQ Group Scheduling support"
 	depends on IOSCHED_CFQ && BLK_CGROUP
