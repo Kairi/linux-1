@@ -1,10 +1,10 @@
 /*
- *  GFQ, or complete fairness queueing, disk scheduler.
+ *  GFQ, or group fairness queueing, for ssd i/o scheduler.
  *
  *  Based on ideas from a previously unfinished io
- *  scheduler (round robin per-process disk scheduling) and Andrea Arcangeli.
+ *  scheduler (round robin per-process disk scheduling) and Andrea Arcangeli and cfq scheduler.
  *
- *  Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
+ *  Copyright (C) 2015 Kairi OKUMURA (kairi199088@gmail.com)
  */
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -34,6 +34,8 @@ static int gfq_slice_idle = 0; // if 0, and if storage supports NCQ, GFQ interna
 static int gfq_group_idle = HZ / 125;
 static const int gfq_target_latency = HZ * 3/10; /* 300 ms */
 static const int gfq_hist_divisor = 4;
+static const int lb_size = 2 * 1024 * 1024; // 2MB
+
 
 /*
  * offset from end of service tree
@@ -3920,6 +3922,7 @@ gfq_rq_enqueued(struct gfq_data *gfqd, struct gfq_queue *gfqq,
 	}
 }
 
+// registerd to elevator_add_req_fn
 static void gfq_insert_request(struct request_queue *q, struct request *rq)
 {
 	struct gfq_data *gfqd = q->elevator->elevator_data;
