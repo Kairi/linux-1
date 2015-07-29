@@ -23,16 +23,16 @@ struct tpgs_queue {
 	/* parent tpgs_data */
 	struct tpgs_data *tppd;
 	/* tpgs_group member */
-	struct list_head tppg_node;
+	struct list_head tpgg_node;
 	/* sorted list of pending requests */
 	struct list_head sort_list; // reqs
-	struct tpgs_group *tppg;
+	struct tpgs_group *tpgg;
 	pid_t pid;
 	int online;
 	int rq_queued; // req count
 };
 
-struct tppg_stats {
+struct tpgg_stats {
 	/* total bytes transferred */
 	struct blkg_rwstat		service_bytes;
 	/* total IOs serviced, post merge */
@@ -73,17 +73,17 @@ struct tpgs_group {
 	 * lists of queues with requests.
 	 */
 	struct list_head queue_list;
-	int nr_tppq;
+	int nr_tpgq;
 	int rq_queued;
 	int rq_in_driver;
 
-	struct tppg_stats stats;	/* stats for this tppg */
-	struct tppg_stats dead_stats;	/* stats pushed from dead children */
+	struct tpgg_stats stats;	/* stats for this tpgg */
+	struct tpgg_stats dead_stats;	/* stats pushed from dead children */
 };
 
 struct tpgs_io_cq {
 	struct io_cq		icq;		/* must be the first member */
-	struct tpgs_queue	*tppq;
+	struct tpgs_queue	*tpgq;
 	uint64_t			blkcg_serial_nr;	/* the current blkcg ID */
 };
 
@@ -106,23 +106,23 @@ struct tpgs_data {
 	unsigned total_weight;
 };
 
-static inline struct blkcg_gq *tppg_to_blkg(struct tpgs_group *tppg)
+static inline struct blkcg_gq *tpgg_to_blkg(struct tpgs_group *tpgg)
 {
-	return pd_to_blkg(&tppg->pd);
+	return pd_to_blkg(&tpgg->pd);
 }
 
-#define tpgs_log_tppq(tppd, tppq, fmt, args...)	do {			\
+#define tpgs_log_tpgq(tppd, tpgq, fmt, args...)	do {			\
 	char __pbuf[128];						\
 									\
-	blkg_path(tppg_to_blkg((tppq)->tppg), __pbuf, sizeof(__pbuf));	\
-	blk_add_trace_msg((tppd)->queue, "tpgs%d %s " fmt, (tppq)->pid, \
+	blkg_path(tpgg_to_blkg((tpgq)->tpgg), __pbuf, sizeof(__pbuf));	\
+	blk_add_trace_msg((tppd)->queue, "tpgs%d %s " fmt, (tpgq)->pid, \
 			  __pbuf, ##args);				\
 } while (0)
 
-#define tpgs_log_tppg(tppd, tppg, fmt, args...)	do {			\
+#define tpgs_log_tpgg(tppd, tpgg, fmt, args...)	do {			\
 	char __pbuf[128];						\
 									\
-	blkg_path(tppg_to_blkg(tppg), __pbuf, sizeof(__pbuf));		\
+	blkg_path(tpgg_to_blkg(tpgg), __pbuf, sizeof(__pbuf));		\
 	blk_add_trace_msg((tppd)->queue, "%s " fmt, __pbuf, ##args);	\
 } while (0)
 #define tpgs_log(tppd, fmt, args...)	\
@@ -135,22 +135,22 @@ static inline struct tpgs_io_cq *icq_to_tic(struct io_cq *icq)
 }
 
 #define RQ_TIC(rq)	icq_to_tic((rq)->elv.icq)
-#define RQ_TPPQ(rq)	(struct tpgs_queue *) ((rq)->elv.priv[0])
-#define RQ_TPPG(rq)	(struct tpgs_group *) ((rq)->elv.priv[1])
+#define RQ_TPGQ(rq)	(struct tpgs_queue *) ((rq)->elv.priv[0])
+#define RQ_TPGG(rq)	(struct tpgs_group *) ((rq)->elv.priv[1])
 
 #define TPGS_WEIGHT_DEFAULT	(500)
 #define MIN_DISPATCH_RQ		(8)
 
 static struct blkcg_policy blkcg_policy_tpgs;
 
-static inline struct tpgs_group *pd_to_tppg(struct blkg_policy_data *pd)
+static inline struct tpgs_group *pd_to_tpgg(struct blkg_policy_data *pd)
 {
 	return pd ? container_of(pd, struct tpgs_group, pd) : NULL;
 }
 
-static inline struct tpgs_group *blkg_to_tppg(struct blkcg_gq *blkg)
+static inline struct tpgs_group *blkg_to_tpgg(struct blkcg_gq *blkg)
 {
-	return pd_to_tppg(blkg_to_pd(blkg, &blkcg_policy_tpgs));
+	return pd_to_tpgg(blkg_to_pd(blkg, &blkcg_policy_tpgs));
 }
 
 static inline struct tpgs_io_cq *
@@ -161,14 +161,14 @@ tpgs_tic_lookup(struct tpgs_data *tppd, struct io_context *ioc)
 	return NULL;
 }
 
-static inline struct tpgs_queue *tic_to_tppq(struct tpgs_io_cq *tic)
+static inline struct tpgs_queue *tic_to_tpgq(struct tpgs_io_cq *tic)
 {
-	return tic->tppq;
+	return tic->tpgq;
 }
 
-static inline void tic_set_tppq(struct tpgs_io_cq *tic, struct tpgs_queue *tppq)
+static inline void tic_set_tpgq(struct tpgs_io_cq *tic, struct tpgs_queue *tpgq)
 {
-	tic->tppq = tppq;
+	tic->tpgq = tpgq;
 }
 
 static inline struct tpgs_data *tic_to_tppd(struct tpgs_io_cq *tic)
@@ -176,44 +176,44 @@ static inline struct tpgs_data *tic_to_tppd(struct tpgs_io_cq *tic)
 	return tic->icq.q->elevator->elevator_data;
 }
 
-static inline void tppg_get(struct tpgs_group *tppg)
+static inline void tpgg_get(struct tpgs_group *tpgg)
 {
-	return blkg_get(tppg_to_blkg(tppg));
+	return blkg_get(tpgg_to_blkg(tpgg));
 }
 
-static inline void tppg_put(struct tpgs_group *tppg)
+static inline void tpgg_put(struct tpgs_group *tpgg)
 {
-	return blkg_put(tppg_to_blkg(tppg));
+	return blkg_put(tpgg_to_blkg(tpgg));
 }
 
-static inline void tppg_stats_update_io_add(struct tpgs_group *tppg,
-					    struct tpgs_group *curr_tppg, int rw)
+static inline void tpgg_stats_update_io_add(struct tpgs_group *tpgg,
+					    struct tpgs_group *curr_tpgg, int rw)
 {
-	blkg_rwstat_add(&tppg->stats.queued, rw, 1);
+	blkg_rwstat_add(&tpgg->stats.queued, rw, 1);
 }
 
-static inline void tppg_stats_update_io_remove(struct tpgs_group *tppg, int rw)
+static inline void tpgg_stats_update_io_remove(struct tpgs_group *tpgg, int rw)
 {
-	blkg_rwstat_add(&tppg->stats.queued, rw, -1);
+	blkg_rwstat_add(&tpgg->stats.queued, rw, -1);
 }
 
-static inline void tppg_stats_update_io_merged(struct tpgs_group *tppg, int rw)
+static inline void tpgg_stats_update_io_merged(struct tpgs_group *tpgg, int rw)
 {
-	blkg_rwstat_add(&tppg->stats.merged, rw, 1);
+	blkg_rwstat_add(&tpgg->stats.merged, rw, 1);
 }
 
-static inline void tppg_stats_update_dispatch(struct tpgs_group *tppg,
+static inline void tpgg_stats_update_dispatch(struct tpgs_group *tpgg,
 					      uint64_t bytes, int rw)
 {
-	blkg_stat_add(&tppg->stats.sectors, bytes >> 9);
-	blkg_rwstat_add(&tppg->stats.serviced, rw, 1);
-	blkg_rwstat_add(&tppg->stats.service_bytes, rw, bytes);
+	blkg_stat_add(&tpgg->stats.sectors, bytes >> 9);
+	blkg_rwstat_add(&tpgg->stats.serviced, rw, 1);
+	blkg_rwstat_add(&tpgg->stats.service_bytes, rw, bytes);
 }
 
-static inline void tppg_stats_update_completion(struct tpgs_group *tppg,
+static inline void tpgg_stats_update_completion(struct tpgs_group *tpgg,
 			uint64_t start_time, uint64_t io_start_time, int rw)
 {
-	struct tppg_stats *stats = &tppg->stats;
+	struct tpgg_stats *stats = &tpgg->stats;
 	unsigned long long now = sched_clock();
 
 	if (time_after64(now, io_start_time))
@@ -223,23 +223,23 @@ static inline void tppg_stats_update_completion(struct tpgs_group *tppg,
 				io_start_time - start_time);
 }
 
-static void tpgs_del_queue(struct tpgs_queue *tppq)
+static void tpgs_del_queue(struct tpgs_queue *tpgq)
 {
-	struct tpgs_data *tppd = tppq->tppd;
-	struct tpgs_group *tppg = tppq->tppg;
+	struct tpgs_data *tppd = tpgq->tppd;
+	struct tpgs_group *tpgg = tpgq->tpgg;
 
-	if (!list_empty(&tppq->tppg_node)) {
-		list_del_init(&tppq->tppg_node);
-		tpgs_log_tppq(tppd, tppq, "del queue\n");
-		tppg->cur_dispatcher = NULL;
-		tppq->tppg = NULL;
+	if (!list_empty(&tpgq->tpgg_node)) {
+		list_del_init(&tpgq->tpgg_node);
+		tpgs_log_tpgq(tppd, tpgq, "del queue\n");
+		tpgg->cur_dispatcher = NULL;
+		tpgq->tpgg = NULL;
 	}
 
-	printk("%p nr_tppq:%d\n", tppg, tppg->nr_tppq);
-	BUG_ON(tppg->nr_tppq < 1);
-	tppg->nr_tppq--;
-	if (!tppg->nr_tppq)
-		tppd->total_weight -= tppg->pd.blkg->blkcg->cfq_weight;
+	printk("%p nr_tpgq:%d\n", tpgg, tpgg->nr_tpgq);
+	BUG_ON(tpgg->nr_tpgq < 1);
+	tpgg->nr_tpgq--;
+	if (!tpgg->nr_tpgq)
+		tppd->total_weight -= tpgg->pd.blkg->blkcg->cfq_weight;
 
 	BUG_ON(!tppd->busy_queues);
 	tppd->busy_queues--;
@@ -252,122 +252,122 @@ static void tpgs_del_queue(struct tpgs_queue *tppq)
  * Each tpgs queue took a reference on the parent group. Drop it now.
  * queue lock must be held here.
  */
-static void tpgs_put_queue(struct tpgs_queue *tppq)
+static void tpgs_put_queue(struct tpgs_queue *tpgq)
 {
-	struct tpgs_data *tppd = tppq->tppd;
-	struct tpgs_group *tppg;
+	struct tpgs_data *tppd = tpgq->tppd;
+	struct tpgs_group *tpgg;
 
-	BUG_ON(tppq->ref <= 0);
+	BUG_ON(tpgq->ref <= 0);
 
-	tppq->ref--;
-	if (tppq->ref)
+	tpgq->ref--;
+	if (tpgq->ref)
 		return;
 
-	tpgs_log_tppq(tppd, tppq, "put_queue");
-	BUG_ON(!list_empty(&tppq->sort_list));
-	tppg = tppq->tppg;
+	tpgs_log_tpgq(tppd, tpgq, "put_queue");
+	BUG_ON(!list_empty(&tpgq->sort_list));
+	tpgg = tpgq->tpgg;
 
-	tpgs_del_queue(tppq);
-	kmem_cache_free(tpgs_pool, tppq);
-	tppg_put(tppg);
+	tpgs_del_queue(tpgq);
+	kmem_cache_free(tpgs_pool, tpgq);
+	tpgg_put(tpgg);
 }
 
-static void tpgs_init_tppq(struct tpgs_data *tppd, struct tpgs_queue *tppq,
+static void tpgs_init_tpgq(struct tpgs_data *tppd, struct tpgs_queue *tpgq,
 			  pid_t pid)
 {
-	INIT_LIST_HEAD(&tppq->tppg_node);
-	INIT_LIST_HEAD(&tppq->sort_list);
+	INIT_LIST_HEAD(&tpgq->tpgg_node);
+	INIT_LIST_HEAD(&tpgq->sort_list);
 
-	tppq->ref = 0;
-	tppq->tppd = tppd;
-	tppq->pid = pid;
+	tpgq->ref = 0;
+	tpgq->tppd = tppd;
+	tpgq->pid = pid;
 
 }
 
-static void tpgs_link_tppq_tppg(struct tpgs_queue *tppq,
-		struct tpgs_group *tppg)
+static void tpgs_link_tpgq_tpgg(struct tpgs_queue *tpgq,
+		struct tpgs_group *tpgg)
 {
-	tppq->tppg = tppg;
-	/* tppq reference on tppg */
-	tppg_get(tppg);
+	tpgq->tpgg = tpgg;
+	/* tpgq reference on tpgg */
+	tpgg_get(tpgg);
 }
 
-static struct tpgs_group *tpgs_lookup_create_tppg(struct tpgs_data *tppd,
+static struct tpgs_group *tpgs_lookup_create_tpgg(struct tpgs_data *tppd,
 						struct blkcg *blkcg)
 {
 	struct request_queue *q = tppd->queue;
-	struct tpgs_group *tppg = NULL;
+	struct tpgs_group *tpgg = NULL;
 
 	/* avoid lookup for the common case where there's no blkcg */
 	if (blkcg == &blkcg_root) {
-		tppg = tppd->root_group;
+		tpgg = tppd->root_group;
 	} else {
 		struct blkcg_gq *blkg;
 
 		blkg = blkg_lookup_create(blkcg, q);
 		if (!IS_ERR(blkg))
-			tppg = blkg_to_tppg(blkg);
+			tpgg = blkg_to_tpgg(blkg);
 	}
 
-	return tppg;
+	return tpgg;
 }
 
 static struct tpgs_queue *
 tpgs_find_alloc_queue(struct tpgs_data *tppd, struct tpgs_io_cq* tic, struct bio *bio,
 		gfp_t gfp_mask)
 {
-	struct tpgs_queue *tppq, *new_tppq = NULL;
-	struct tpgs_group *tppg;
+	struct tpgs_queue *tpgq, *new_tpgq = NULL;
+	struct tpgs_group *tpgg;
 	struct blkcg *blkcg;
 
 retry:
 	rcu_read_lock();
 
 	blkcg = bio_blkcg(bio);
-	tppg = tpgs_lookup_create_tppg(tppd, blkcg);
-	tppq = tic_to_tppq(tic);
+	tpgg = tpgs_lookup_create_tpgg(tppd, blkcg);
+	tpgq = tic_to_tpgq(tic);
 
-	if (!tppq) {
-		if (new_tppq) {
-			tppq = new_tppq;
-			new_tppq = NULL;
+	if (!tpgq) {
+		if (new_tpgq) {
+			tpgq = new_tpgq;
+			new_tpgq = NULL;
 		} else if (gfp_mask & __GFP_WAIT) {
 			rcu_read_unlock();
 			spin_unlock_irq(tppd->queue->queue_lock);
-			new_tppq = kmem_cache_alloc_node(tpgs_pool,
+			new_tpgq = kmem_cache_alloc_node(tpgs_pool,
 					gfp_mask | __GFP_ZERO,
 					tppd->queue->node);
 			spin_lock_irq(tppd->queue->queue_lock);
-			if (new_tppq)
+			if (new_tpgq)
 				goto retry;
 		} else
-			tppq = kmem_cache_alloc_node(tpgs_pool,
+			tpgq = kmem_cache_alloc_node(tpgs_pool,
 					gfp_mask | __GFP_ZERO,
 					tppd->queue->node);
 
-		if (tppq) {
-			tpgs_init_tppq(tppd, tppq, current->pid);
-			tpgs_link_tppq_tppg(tppq, tppg);
-			tpgs_log_tppq(tppd, tppq, "alloced");
+		if (tpgq) {
+			tpgs_init_tpgq(tppd, tpgq, current->pid);
+			tpgs_link_tpgq_tpgg(tpgq, tpgg);
+			tpgs_log_tpgq(tppd, tpgq, "alloced");
 		}
 	}
 
-	if (new_tppq)
-		kmem_cache_free(tpgs_pool, new_tppq);
+	if (new_tpgq)
+		kmem_cache_free(tpgs_pool, new_tpgq);
 
 	rcu_read_unlock();
-	return tppq;
+	return tpgq;
 }
 
 static struct tpgs_queue *
 tpgs_get_queue(struct tpgs_data *tppd, struct tpgs_io_cq *tic, struct bio *bio,
 			gfp_t gfp_mask)
 {
-	struct tpgs_queue *tppq;
+	struct tpgs_queue *tpgq;
 
-	tppq = tpgs_find_alloc_queue(tppd, tic, bio, gfp_mask);
-	tppq->ref++;
-	return tppq;
+	tpgq = tpgs_find_alloc_queue(tppd, tic, bio, gfp_mask);
+	tpgq->ref++;
+	return tpgq;
 }
 
 /*
@@ -385,7 +385,7 @@ static inline void tpgs_schedule_dispatch(struct tpgs_data *tppd)
 static void check_blkcg_changed(struct tpgs_io_cq *tic, struct bio *bio)
 {
 	struct tpgs_data *tppd = tic_to_tppd(tic);
-	struct tpgs_queue *tppq;
+	struct tpgs_queue *tpgq;
 	uint64_t serial_nr;
 
 	rcu_read_lock();
@@ -399,15 +399,15 @@ static void check_blkcg_changed(struct tpgs_io_cq *tic, struct bio *bio)
 	if (unlikely(!tppd) || likely(tic->blkcg_serial_nr == serial_nr))
 		return;
 
-	tppq = tic_to_tppq(tic);
-	if (tppq) {
+	tpgq = tic_to_tpgq(tic);
+	if (tpgq) {
 		/*
 		 * Drop reference to sync queue. A new sync queue will be
 		 * assigned in new group upon arrival of a fresh request.
 		 */
-		tpgs_log_tppq(tppd, tppq, "changed cgroup");
-		tic_set_tppq(tic, NULL);
-		tpgs_put_queue(tppq);
+		tpgs_log_tpgq(tppd, tpgq, "changed cgroup");
+		tic_set_tpgq(tic, NULL);
+		tpgs_put_queue(tpgq);
 	}
 
 	tic->blkcg_serial_nr = serial_nr;
@@ -419,7 +419,7 @@ tpgs_set_request(struct request_queue *q, struct request *rq, struct bio *bio,
 {
 	struct tpgs_data *tppd = q->elevator->elevator_data;
 	struct tpgs_io_cq *tic = icq_to_tic(rq->elv.icq);
-	struct tpgs_queue *tppq;
+	struct tpgs_queue *tpgq;
 
 	might_sleep_if(gfp_mask & __GFP_WAIT);
 
@@ -427,16 +427,16 @@ tpgs_set_request(struct request_queue *q, struct request *rq, struct bio *bio,
 
 	check_blkcg_changed(tic, bio);
 
-	tppq = tic_to_tppq(tic);
-	if (!tppq) {
-		tppq = tpgs_get_queue(tppd, tic, bio, gfp_mask);
-		tic_set_tppq(tic, tppq);
+	tpgq = tic_to_tpgq(tic);
+	if (!tpgq) {
+		tpgq = tpgs_get_queue(tppd, tic, bio, gfp_mask);
+		tic_set_tpgq(tic, tpgq);
 	}
 
-	tppq->ref++;
-	tppg_get(tppq->tppg);
-	rq->elv.priv[0] = tppq;
-	rq->elv.priv[1] = tppq->tppg;
+	tpgq->ref++;
+	tpgg_get(tpgq->tpgg);
+	rq->elv.priv[0] = tpgq;
+	rq->elv.priv[1] = tpgq->tpgg;
 	spin_unlock_irq(q->queue_lock);
 	return 0;
 }
@@ -446,49 +446,49 @@ tpgs_set_request(struct request_queue *q, struct request *rq, struct bio *bio,
  */
 static void tpgs_put_request(struct request *rq)
 {
-	struct tpgs_queue *tppq = RQ_TPPQ(rq);
+	struct tpgs_queue *tpgq = RQ_TPGQ(rq);
 
-	if (tppq) {
-		WARN_ON(tppq->tppg != RQ_TPPG(rq));
+	if (tpgq) {
+		WARN_ON(tpgq->tpgg != RQ_TPGG(rq));
 
 		/* Put down rq reference on cfqg */
-		tppg_put(RQ_TPPG(rq));
+		tpgg_put(RQ_TPGG(rq));
 		rq->elv.priv[0] = NULL;
 		rq->elv.priv[1] = NULL;
 
-		tpgs_put_queue(tppq);
+		tpgs_put_queue(tpgq);
 	}
 }
 
 static void
-tpgs_update_group_weight(struct tpgs_group *tppg)
+tpgs_update_group_weight(struct tpgs_group *tpgg)
 {
-	if (tppg->needs_update) {
-		tppg->weight = tppg->new_weight;
-		tppg->needs_update = false;
+	if (tpgg->needs_update) {
+		tpgg->weight = tpgg->new_weight;
+		tpgg->needs_update = false;
 	}
 }
 
-static void tpgs_add_queue(struct tpgs_data *tppd, struct tpgs_queue *tppq)
+static void tpgs_add_queue(struct tpgs_data *tppd, struct tpgs_queue *tpgq)
 {
-	struct tpgs_group *tppg;
+	struct tpgs_group *tpgg;
 
-	if (!tppq->online) {
-		tppq->online = 1;
-		tppg = tppq->tppg;
-		tpgs_log_tppq(tppd, tppq, "add queue");
-		tppg->nr_tppq++;
+	if (!tpgq->online) {
+		tpgq->online = 1;
+		tpgg = tpgq->tpgg;
+		tpgs_log_tpgq(tppd, tpgq, "add queue");
+		tpgg->nr_tpgq++;
 		tppd->busy_queues++;
-		list_add(&tppq->tppg_node, &tppg->queue_list);
-		printk("add tppq %p to %p\n", tppq, tppg);
-		tpgs_update_group_weight(tppg);
-		if (tppg->nr_tppq <= 1) {
-			tppd->total_weight += tppg->pd.blkg->blkcg->cfq_weight;
-			list_add(&tppg->tppd_node, &tppd->group_list);
-			printk("twt:%u, wt:%u %u %d %p\n", tppd->total_weight, tppg->weight,
-					tppg->pd.blkg->blkcg->cfq_weight,
-					tppg->nr_tppq,
-					tppg);
+		list_add(&tpgq->tpgg_node, &tpgg->queue_list);
+		printk("add tpgq %p to %p\n", tpgq, tpgg);
+		tpgs_update_group_weight(tpgg);
+		if (tpgg->nr_tpgq <= 1) {
+			tppd->total_weight += tpgg->pd.blkg->blkcg->cfq_weight;
+			list_add(&tpgg->tppd_node, &tppd->group_list);
+			printk("twt:%u, wt:%u %u %d %p\n", tppd->total_weight, tpgg->weight,
+					tpgg->pd.blkg->blkcg->cfq_weight,
+					tpgg->nr_tpgq,
+					tpgg);
 		}
 	}
 }
@@ -497,57 +497,57 @@ static void tpgs_add_queue(struct tpgs_data *tppd, struct tpgs_queue *tppq)
 static void tpgs_insert_request(struct request_queue *q, struct request *rq)
 {
 	struct tpgs_data *tppd = q->elevator->elevator_data;
-	struct tpgs_queue *tppq = RQ_TPPQ(rq);
+	struct tpgs_queue *tpgq = RQ_TPGQ(rq);
 
-	tpgs_log_tppq(tppd, tppq, "insert_request");
+	tpgs_log_tpgq(tppd, tpgq, "insert_request");
 
-	list_add_tail(&rq->queuelist, &tppq->sort_list);
-	tppq->rq_queued++;
-	tppq->tppg->rq_queued++;
+	list_add_tail(&rq->queuelist, &tpgq->sort_list);
+	tpgq->rq_queued++;
+	tpgq->tpgg->rq_queued++;
 	tppd->dispatched++;
-	tpgs_add_queue(tppd, tppq);
-	tppg_stats_update_io_add(RQ_TPPG(rq), tppq->tppg, rq->cmd_flags);
+	tpgs_add_queue(tppd, tpgq);
+	tpgg_stats_update_io_add(RQ_TPGG(rq), tpgq->tpgg, rq->cmd_flags);
 }
 
 static void tpgs_remove_request(struct request *rq)
 {
-	struct tpgs_queue *tppq = RQ_TPPQ(rq);
+	struct tpgs_queue *tpgq = RQ_TPGQ(rq);
 
 	list_del_init(&rq->queuelist);
-	tppq->rq_queued--;
-	tppq->tppg->rq_queued--;
-	tppg_stats_update_io_remove(RQ_TPPG(rq), rq->cmd_flags);
+	tpgq->rq_queued--;
+	tpgq->tpgg->rq_queued--;
+	tpgg_stats_update_io_remove(RQ_TPGG(rq), rq->cmd_flags);
 }
 
 /*
  * Move request from internal lists to the request queue dispatch list.
  */
 static int tpgs_dispatch_insert(struct request_queue *q,
-				struct tpgs_queue *tppq)
+				struct tpgs_queue *tpgq)
 {
-	struct list_head *rbnext = tppq->sort_list.next;
+	struct list_head *rbnext = tpgq->sort_list.next;
 	struct request *rq;
 
-	if (rbnext == &tppq->sort_list)
+	if (rbnext == &tpgq->sort_list)
 		return 0;
 
 	rq = rq_entry_fifo(rbnext);
 	tpgs_remove_request(rq);
 	elv_dispatch_sort(q, rq);
-	tppg_stats_update_dispatch(tppq->tppg, blk_rq_bytes(rq), rq->cmd_flags);
+	tpgg_stats_update_dispatch(tpgq->tpgg, blk_rq_bytes(rq), rq->cmd_flags);
 	return 1;
 }
 
 static int tpgs_dispatch_requests_nr(struct tpgs_data *tppd,
-				struct tpgs_queue *tppq, int count)
+				struct tpgs_queue *tpgq, int count)
 {
 	int cnt = 0, ret;
 
-	if (!tppq->rq_queued)
+	if (!tpgq->rq_queued)
 		return cnt;
 
 	do {
-		ret = tpgs_dispatch_insert(tppd->queue, tppq);
+		ret = tpgs_dispatch_insert(tppd->queue, tpgq);
 		if (ret) {
 			cnt++;
 			tppd->dispatched--;
@@ -562,8 +562,8 @@ static int tpgs_dispatch_requests_nr(struct tpgs_data *tppd,
 static int tpgs_dispatch_requests(struct request_queue *q, int force)
 {
 	struct tpgs_data *tppd = q->elevator->elevator_data;
-	struct tpgs_group *tppg, *group_n;
-	struct tpgs_queue *tppq;
+	struct tpgs_group *tpgg, *group_n;
+	struct tpgs_queue *tpgq;
 	struct list_head *next;
 	int count = 0, total = 0, ret;
 	int quota, grp_quota;
@@ -575,41 +575,41 @@ static int tpgs_dispatch_requests(struct request_queue *q, int force)
 	if (quota < MIN_DISPATCH_RQ && !force)
 		return 0;
 
-	list_for_each_entry_safe(tppg, group_n, &tppd->group_list, tppd_node) {
-		if (!tppg->nr_tppq)
+	list_for_each_entry_safe(tpgg, group_n, &tppd->group_list, tppd_node) {
+		if (!tpgg->nr_tpgq)
 			continue;
-		grp_quota = (quota * tppg->pd.blkg->blkcg->cfq_weight
-					/ tppd->total_weight) - tppg->rq_in_driver;
-		tpgs_log_tppg(tppd, tppg,
+		grp_quota = (quota * tpgg->pd.blkg->blkcg->cfq_weight
+					/ tppd->total_weight) - tpgg->rq_in_driver;
+		tpgs_log_tpgg(tppd, tpgg,
 			"nr:%d, wt:%u total_wt:%u in_driver:%d %d quota:%d grp_quota:%d",
-			tppg->nr_tppq, tppg->pd.blkg->blkcg->cfq_weight,
-			tppd->total_weight, tppg->rq_in_driver, tppg->rq_queued,
+			tpgg->nr_tpgq, tpgg->pd.blkg->blkcg->cfq_weight,
+			tppd->total_weight, tpgg->rq_in_driver, tpgg->rq_queued,
 			quota, grp_quota);
 		if (grp_quota <= 0 && !force)
 			continue;
-		BUG_ON(tppg->queue_list.next == &tppg->queue_list);
-		if (!tppg->cur_dispatcher)
-			tppg->cur_dispatcher = tppg->queue_list.next;
-		next = tppg->cur_dispatcher;
+		BUG_ON(tpgg->queue_list.next == &tpgg->queue_list);
+		if (!tpgg->cur_dispatcher)
+			tpgg->cur_dispatcher = tpgg->queue_list.next;
+		next = tpgg->cur_dispatcher;
 		count = 0;
 		do {
-			tppq = list_entry(next, struct tpgs_queue, tppg_node);
-			tpgs_log_tppq(tppd, tppq, "tppq: %d\n", tppq->rq_queued);
+			tpgq = list_entry(next, struct tpgs_queue, tpgg_node);
+			tpgs_log_tpgq(tppd, tpgq, "tpgq: %d\n", tpgq->rq_queued);
 			if (force)
-				ret = tpgs_dispatch_requests_nr(tppd, tppq, -1);
+				ret = tpgs_dispatch_requests_nr(tppd, tpgq, -1);
 			else
-				ret = tpgs_dispatch_requests_nr(tppd, tppq, 1);
+				ret = tpgs_dispatch_requests_nr(tppd, tpgq, 1);
 			count += ret;
 			total += ret;
 			next = next->next;
-			if (next == &tppg->queue_list)
-				next = tppg->queue_list.next;
+			if (next == &tpgg->queue_list)
+				next = tpgg->queue_list.next;
 			if (count >= grp_quota && !force) {
-				tppg->cur_dispatcher = next;
+				tpgg->cur_dispatcher = next;
 				break;
 			}
-			BUG_ON(tppg->cur_dispatcher == &tppg->queue_list);
-		} while (next != tppg->cur_dispatcher);
+			BUG_ON(tpgg->cur_dispatcher == &tpgg->queue_list);
+		} while (next != tpgg->cur_dispatcher);
 	}
 	return total > 0;
 }
@@ -625,18 +625,18 @@ static void tpgs_kick_queue(struct work_struct *work)
 	spin_unlock_irq(q->queue_lock);
 }
 
-static void tpgs_init_tppg_base(struct tpgs_group *tppg)
+static void tpgs_init_tpgg_base(struct tpgs_group *tpgg)
 {
-	INIT_LIST_HEAD(&tppg->tppd_node);
-	INIT_LIST_HEAD(&tppg->queue_list);
-	tppg->cur_dispatcher = NULL;
+	INIT_LIST_HEAD(&tpgg->tppd_node);
+	INIT_LIST_HEAD(&tpgg->queue_list);
+	tpgg->cur_dispatcher = NULL;
 
 }
 
 static int tpgs_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	struct tpgs_data *tppd;
-	struct tpgs_group *tppg;
+	struct tpgs_group *tpgg;
 	int ret;
 	struct elevator_queue *eq;
 
@@ -666,13 +666,13 @@ static int tpgs_init_queue(struct request_queue *q, struct elevator_type *e)
 		goto out_free;
 
 	/* Init root group */
-	tppd->root_group = blkg_to_tppg(q->root_blkg);
-	tppg = tppd->root_group;
-	tpgs_init_tppg_base(tppg);
+	tppd->root_group = blkg_to_tpgg(q->root_blkg);
+	tpgg = tppd->root_group;
+	tpgs_init_tpgg_base(tpgg);
 
 	/* Give preference to root group over other groups */
-	tppg->weight = 2 * TPGS_WEIGHT_DEFAULT;
-	tppg->leaf_weight = 2 * TPGS_WEIGHT_DEFAULT;
+	tpgg->weight = 2 * TPGS_WEIGHT_DEFAULT;
+	tpgg->leaf_weight = 2 * TPGS_WEIGHT_DEFAULT;
 
 	INIT_WORK(&tppd->unplug_work, tpgs_kick_queue);
 
@@ -698,40 +698,40 @@ static void tpgs_exit_queue(struct elevator_queue *e)
 
 static void tpgs_activate_request(struct request_queue *q, struct request *rq)
 {
-	struct tpgs_queue *tppq = RQ_TPPQ(rq);
+	struct tpgs_queue *tpgq = RQ_TPGQ(rq);
 	struct tpgs_data *tppd = q->elevator->elevator_data;
 	tppd->rq_in_driver++;
-	tppq->tppg->rq_in_driver++;
-	tpgs_log_tppq(tppd, RQ_TPPQ(rq), "activate rq, drv=%d",
+	tpgq->tpgg->rq_in_driver++;
+	tpgs_log_tpgq(tppd, RQ_TPGQ(rq), "activate rq, drv=%d",
 						tppd->rq_in_driver);
 }
 
 static void tpgs_deactivate_request(struct request_queue *q, struct request *rq)
 {
-	struct tpgs_queue *tppq = RQ_TPPQ(rq);
+	struct tpgs_queue *tpgq = RQ_TPGQ(rq);
 	struct tpgs_data *tppd = q->elevator->elevator_data;
 
 	WARN_ON(!tppd->rq_in_driver);
 	tppd->rq_in_driver--;
-	tppq->tppg->rq_in_driver--;
-	tpgs_log_tppq(tppd, RQ_TPPQ(rq), "deactivate rq, drv=%d",
+	tpgq->tpgg->rq_in_driver--;
+	tpgs_log_tpgq(tppd, RQ_TPGQ(rq), "deactivate rq, drv=%d",
 						tppd->rq_in_driver);
 }
 
 static void tpgs_completed_request(struct request_queue *q, struct request *rq)
 {
-	struct tpgs_queue *tppq = RQ_TPPQ(rq);
-	struct tpgs_data *tppd = tppq->tppd;
+	struct tpgs_queue *tpgq = RQ_TPGQ(rq);
+	struct tpgs_data *tppd = tpgq->tppd;
 
-	WARN_ON(!tppq);
-	WARN_ON(tppq->tppg != RQ_TPPG(rq));
+	WARN_ON(!tpgq);
+	WARN_ON(tpgq->tpgg != RQ_TPGG(rq));
 
-	tpgs_log_tppq(tppd, tppq, "complete rqnoidle %d",
+	tpgs_log_tpgq(tppd, tpgq, "complete rqnoidle %d",
 			!!(rq->cmd_flags & REQ_NOIDLE));
 	WARN_ON(!tppd->rq_in_driver);
 	tppd->rq_in_driver--;
-	tppq->tppg->rq_in_driver--;
-	tppg_stats_update_completion(tppq->tppg,
+	tpgq->tpgg->rq_in_driver--;
+	tpgg_stats_update_completion(tpgq->tpgg,
 			rq_start_time_ns(rq), rq_io_start_time_ns(rq), rq->cmd_flags);
 
 	if (!tppd->rq_in_driver)
@@ -742,13 +742,13 @@ static void
 tpgs_merged_request(struct request_queue *q, struct request *rq, int type)
 {
 	if (type == ELEVATOR_FRONT_MERGE) {
-		struct tpgs_queue *tppq = RQ_TPPQ(rq);
+		struct tpgs_queue *tpgq = RQ_TPGQ(rq);
 		list_del_init(&rq->queuelist);
-		tppq->rq_queued--;
-		tppg_stats_update_io_remove(RQ_TPPG(rq), rq->cmd_flags);
-		list_add_tail(&rq->queuelist, &tppq->sort_list);
-		tppq->rq_queued++;
-		tppg_stats_update_io_add(RQ_TPPG(rq), tppq->tppg, rq->cmd_flags);
+		tpgq->rq_queued--;
+		tpgg_stats_update_io_remove(RQ_TPGG(rq), rq->cmd_flags);
+		list_add_tail(&rq->queuelist, &tpgq->sort_list);
+		tpgq->rq_queued++;
+		tpgg_stats_update_io_add(RQ_TPGG(rq), tpgq->tpgg, rq->cmd_flags);
 	}
 }
 
@@ -757,7 +757,7 @@ tpgs_merged_requests(struct request_queue *q, struct request *rq,
 			struct request *next)
 {
 	tpgs_remove_request(next);
-	tppg_stats_update_io_merged(RQ_TPPG(rq), rq->cmd_flags);
+	tpgg_stats_update_io_merged(RQ_TPGG(rq), rq->cmd_flags);
 }
 
 static void tpgs_init_icq(struct io_cq *icq)
@@ -767,9 +767,9 @@ static void tpgs_exit_icq(struct io_cq *icq)
 {
 	struct tpgs_io_cq *tic = icq_to_tic(icq);
 
-	if (tic->tppq) {
-		tpgs_put_queue(tic->tppq);
-		tic->tppq = NULL;
+	if (tic->tpgq) {
+		tpgs_put_queue(tic->tpgq);
+		tic->tpgq = NULL;
 	}
 }
 
@@ -795,62 +795,62 @@ static struct elevator_type iosched_tpgs = {
 	.elevator_owner =	THIS_MODULE,
 };
 
-static u64 tppg_prfill_weight_device(struct seq_file *sf,
+static u64 tpgg_prfill_weight_device(struct seq_file *sf,
 				     struct blkg_policy_data *pd, int off)
 {
-	struct tpgs_group *tppg = pd_to_tppg(pd);
+	struct tpgs_group *tpgg = pd_to_tpgg(pd);
 
-	if (!tppg->dev_weight)
+	if (!tpgg->dev_weight)
 		return 0;
-	return __blkg_prfill_u64(sf, pd, tppg->dev_weight);
+	return __blkg_prfill_u64(sf, pd, tpgg->dev_weight);
 }
 
-static int tppg_print_weight_device(struct seq_file *sf, void *v)
+static int tpgg_print_weight_device(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-					  tppg_prfill_weight_device, &blkcg_policy_tpgs,
+					  tpgg_prfill_weight_device, &blkcg_policy_tpgs,
 					  0, false);
 	return 0;
 }
 
-static u64 tppg_prfill_leaf_weight_device(struct seq_file *sf,
+static u64 tpgg_prfill_leaf_weight_device(struct seq_file *sf,
 					  struct blkg_policy_data *pd, int off)
 {
-	struct tpgs_group *tppg = pd_to_tppg(pd);
+	struct tpgs_group *tpgg = pd_to_tpgg(pd);
 
-	if (!tppg->dev_leaf_weight)
+	if (!tpgg->dev_leaf_weight)
 		return 0;
-	return __blkg_prfill_u64(sf, pd, tppg->dev_leaf_weight);
+	return __blkg_prfill_u64(sf, pd, tpgg->dev_leaf_weight);
 }
 
-static int tppg_print_leaf_weight_device(struct seq_file *sf, void *v)
+static int tpgg_print_leaf_weight_device(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-					  tppg_prfill_leaf_weight_device, &blkcg_policy_tpgs,
+					  tpgg_prfill_leaf_weight_device, &blkcg_policy_tpgs,
 					  0, false);
 	return 0;
 }
 
-static int tppg_print_weight(struct seq_file *sf, void *v)
+static int tpgg_print_weight(struct seq_file *sf, void *v)
 {
 	seq_printf(sf, "%u\n", css_to_blkcg(seq_css(sf))->cfq_weight); 
 	return 0;
 }
 
-static int tppg_print_leaf_weight(struct seq_file *sf, void *v)
+static int tpgg_print_leaf_weight(struct seq_file *sf, void *v)
 {
 	seq_printf(sf, "%u\n",  css_to_blkcg(seq_css(sf))->cfq_leaf_weight);
 	return 0;
 }
 
 			   
-static ssize_t __tppg_set_weight_device(struct kernfs_open_file *of,
+static ssize_t __tpgg_set_weight_device(struct kernfs_open_file *of,
 										char *buf, size_t nbytes, loff_t off,
 										bool is_leaf_weight)
 {
 	struct blkcg *blkcg = css_to_blkcg(of_css(of));	
 	struct blkg_conf_ctx ctx;
-	struct tpgs_group *tppg;
+	struct tpgs_group *tpgg;
 	int ret;
 
 	ret = blkg_conf_prep(blkcg, &blkcg_policy_tpgs, buf, &ctx);
@@ -858,14 +858,14 @@ static ssize_t __tppg_set_weight_device(struct kernfs_open_file *of,
 		return ret;
 
 	ret = -EINVAL;
-	tppg = blkg_to_tppg(ctx.blkg);
+	tpgg = blkg_to_tpgg(ctx.blkg);
 	if (!ctx.v || (ctx.v >= CFQ_WEIGHT_MIN && ctx.v <= CFQ_WEIGHT_MAX)) {
 		if (!is_leaf_weight) {
-			tppg->dev_weight = ctx.v;
-			tppg->new_weight = ctx.v ?: blkcg->cfq_weight;
+			tpgg->dev_weight = ctx.v;
+			tpgg->new_weight = ctx.v ?: blkcg->cfq_weight;
 		} else {
-			tppg->dev_leaf_weight = ctx.v;
-			tppg->new_leaf_weight = ctx.v ?: blkcg->cfq_leaf_weight;
+			tpgg->dev_leaf_weight = ctx.v;
+			tpgg->new_leaf_weight = ctx.v ?: blkcg->cfq_leaf_weight;
 		}
 		ret = 0;
 	}
@@ -874,16 +874,16 @@ static ssize_t __tppg_set_weight_device(struct kernfs_open_file *of,
 	return ret;
 }			   
 
-static ssize_t tppg_set_weight_device(struct kernfs_open_file *of,
+static ssize_t tpgg_set_weight_device(struct kernfs_open_file *of,
 								  char *buf, size_t nbytes, loff_t off)
 {
-	return __tppg_set_weight_device(of, buf, nbytes, off, false);
+	return __tpgg_set_weight_device(of, buf, nbytes, off, false);
 }
 
-static ssize_t tppg_set_leaf_weight_device(struct kernfs_open_file *of,
+static ssize_t tpgg_set_leaf_weight_device(struct kernfs_open_file *of,
 										   char *buf, size_t nbytes, loff_t off)
 {
-	return __tppg_set_weight_device(of, buf, nbytes, off, true);
+	return __tpgg_set_weight_device(of, buf, nbytes, off, true);
 }
 
 static int __tpgs_set_weight(struct cgroup_subsys_state *css, struct cftype *cft,
@@ -904,17 +904,17 @@ static int __tpgs_set_weight(struct cgroup_subsys_state *css, struct cftype *cft
 		blkcg->cfq_leaf_weight = val;
 
 	hlist_for_each_entry(blkg, &blkcg->blkg_list, blkcg_node) {
-		struct tpgs_group *tppg = blkg_to_tppg(blkg);
+		struct tpgs_group *tpgg = blkg_to_tpgg(blkg);
 
-		if (!tppg)
+		if (!tpgg)
 			continue;
 
 		if (!is_leaf_weight) {
-			if (!tppg->dev_weight)
-				tppg->new_weight = blkcg->cfq_weight;
+			if (!tpgg->dev_weight)
+				tpgg->new_weight = blkcg->cfq_weight;
 		} else {
-			if (!tppg->dev_leaf_weight)
-				tppg->new_leaf_weight = blkcg->cfq_leaf_weight;
+			if (!tpgg->dev_leaf_weight)
+				tpgg->new_leaf_weight = blkcg->cfq_leaf_weight;
 		}
 	}
 
@@ -934,12 +934,12 @@ static int tpgs_set_leaf_weight(struct cgroup_subsys_state *css,
 	return __tpgs_set_weight(css, cft, val, true);
 }
 
-/* offset delta from tppg->stats to tppg->dead_stats */
+/* offset delta from tpgg->stats to tpgg->dead_stats */
 static const int dead_stats_off_delta = offsetof(struct tpgs_group, dead_stats) -
 					offsetof(struct tpgs_group, stats);
 
 /* to be used by recursive prfill, sums live and dead rwstats recursively */
-static struct blkg_rwstat tppg_rwstat_pd_recursive_sum(struct blkg_policy_data *pd,
+static struct blkg_rwstat tpgg_rwstat_pd_recursive_sum(struct blkg_policy_data *pd,
 						       int off)
 {
 	struct blkg_rwstat a, b;
@@ -951,7 +951,7 @@ static struct blkg_rwstat tppg_rwstat_pd_recursive_sum(struct blkg_policy_data *
 }
 
 /* to be used by recursive prfill, sums live and dead stats recursively */
-static u64 tppg_stat_pd_recursive_sum(struct blkg_policy_data *pd, int off)
+static u64 tpgg_stat_pd_recursive_sum(struct blkg_policy_data *pd, int off)
 {
 	u64 sum = 0;
 
@@ -960,48 +960,48 @@ static u64 tppg_stat_pd_recursive_sum(struct blkg_policy_data *pd, int off)
 	return sum;
 }
 
-static int tppg_print_stat(struct seq_file *sf, void *v)
+static int tpgg_print_stat(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), blkg_prfill_stat,
 					  &blkcg_policy_tpgs, seq_cft(sf)->private, false);
 	return 0;
 }
 
-static int tppg_print_rwstat(struct seq_file *sf, void *v)
+static int tpgg_print_rwstat(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), blkg_prfill_rwstat,
 					  &blkcg_policy_tpgs,  seq_cft(sf)->private, true);
 	return 0;
 }
 
-static u64 tppg_prfill_stat_recursive(struct seq_file *sf,
+static u64 tpgg_prfill_stat_recursive(struct seq_file *sf,
 				      struct blkg_policy_data *pd, int off)
 {
-	u64 sum = tppg_stat_pd_recursive_sum(pd, off);
+	u64 sum = tpgg_stat_pd_recursive_sum(pd, off);
 
 	return __blkg_prfill_u64(sf, pd, sum);
 }
 
-static u64 tppg_prfill_rwstat_recursive(struct seq_file *sf,
+static u64 tpgg_prfill_rwstat_recursive(struct seq_file *sf,
 					struct blkg_policy_data *pd, int off)
 {
-	struct blkg_rwstat sum = tppg_rwstat_pd_recursive_sum(pd, off);
+	struct blkg_rwstat sum = tpgg_rwstat_pd_recursive_sum(pd, off);
 
 	return __blkg_prfill_rwstat(sf, pd, &sum);
 }
 
-static int tppg_print_stat_recursive(struct seq_file *sf, void *v)
+static int tpgg_print_stat_recursive(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-					  tppg_prfill_stat_recursive,  &blkcg_policy_tpgs,
+					  tpgg_prfill_stat_recursive,  &blkcg_policy_tpgs,
 					  seq_cft(sf)->private, false);
 	return 0;
 }
 
-static int tppg_print_rwstat_recursive(struct seq_file *sf, void *v)
+static int tpgg_print_rwstat_recursive(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
-					  tppg_prfill_rwstat_recursive,  &blkcg_policy_tpgs,
+					  tpgg_prfill_rwstat_recursive,  &blkcg_policy_tpgs,
 					  seq_cft(sf)->private, true);
 	return 0;
 }
@@ -1011,14 +1011,14 @@ static struct cftype tpgs_blkcg_files[] = {
 	{
 		.name = "tpgs.weight_device",
 		.flags = CFTYPE_ONLY_ON_ROOT,
-		.seq_show = tppg_print_leaf_weight_device,
-		.write = tppg_set_leaf_weight_device,
+		.seq_show = tpgg_print_leaf_weight_device,
+		.write = tpgg_set_leaf_weight_device,
 		.max_write_len = 256,
 	},
 	{
 		.name = "tpgs.weight",
 		.flags = CFTYPE_ONLY_ON_ROOT,
-		.seq_show = tppg_print_leaf_weight,
+		.seq_show = tpgg_print_leaf_weight,
 		.write_u64 = tpgs_set_leaf_weight,
 	},
 
@@ -1026,117 +1026,117 @@ static struct cftype tpgs_blkcg_files[] = {
 	{
 		.name = "tpgs.weight_device",
 		.flags = CFTYPE_NOT_ON_ROOT,
-		.seq_show = tppg_print_weight_device,
-		.write = tppg_set_weight_device,
+		.seq_show = tpgg_print_weight_device,
+		.write = tpgg_set_weight_device,
 		.max_write_len = 256,
 	},
 	{
 		.name = "tpgs.weight",
 		.flags = CFTYPE_NOT_ON_ROOT,
-		.seq_show = tppg_print_weight,
+		.seq_show = tpgg_print_weight,
 		.write_u64 = tpgs_set_weight,
 	},
 
 	{
 		.name = "tpgs.leaf_weight_device",
-		.seq_show = tppg_print_leaf_weight_device,
-		.write = tppg_set_leaf_weight_device,
+		.seq_show = tpgg_print_leaf_weight_device,
+		.write = tpgg_set_leaf_weight_device,
 		.max_write_len = 256,
 	},
 	{
 		.name = "tpgs.leaf_weight",
-		.seq_show = tppg_print_leaf_weight,
+		.seq_show = tpgg_print_leaf_weight,
 		.write_u64 = tpgs_set_leaf_weight,
 	},
 
-	/* statistics, covers only the tasks in the tppg */
+	/* statistics, covers only the tasks in the tpgg */
 	{
 		.name = "tpgs.time",
 		.private = offsetof(struct tpgs_group, stats.time),
-		.seq_show = tppg_print_stat,
+		.seq_show = tpgg_print_stat,
 	},
 	{
 		.name = "tpgs.sectors",
 		.private = offsetof(struct tpgs_group, stats.sectors),
-		.seq_show = tppg_print_stat,
+		.seq_show = tpgg_print_stat,
 	},
 	{
 		.name = "tpgs.io_service_bytes",
 		.private = offsetof(struct tpgs_group, stats.service_bytes),
-		.seq_show = tppg_print_rwstat,
+		.seq_show = tpgg_print_rwstat,
 	},
 	{
 		.name = "tpgs.io_serviced",
 		.private = offsetof(struct tpgs_group, stats.serviced),
-		.seq_show= tppg_print_rwstat,
+		.seq_show= tpgg_print_rwstat,
 	},
 	{
 		.name = "tpgs.io_service_time",
 		.private = offsetof(struct tpgs_group, stats.service_time),
-		.seq_show = tppg_print_rwstat,
+		.seq_show = tpgg_print_rwstat,
 	},
 	{
 		.name = "tpgs.io_wait_time",
 		.private = offsetof(struct tpgs_group, stats.wait_time),
-		.seq_show = tppg_print_rwstat,
+		.seq_show = tpgg_print_rwstat,
 	},
 	{
 		.name = "tpgs.io_merged",
 		.private = offsetof(struct tpgs_group, stats.merged),
-		.seq_show = tppg_print_rwstat,
+		.seq_show = tpgg_print_rwstat,
 	},
 	{
 		.name = "tpgs.io_queued",
 		.private = offsetof(struct tpgs_group, stats.queued),
-		.seq_show = tppg_print_rwstat,
+		.seq_show = tpgg_print_rwstat,
 	},
 
-	/* the same statictics which cover the tppg and its descendants */
+	/* the same statictics which cover the tpgg and its descendants */
 	{
 		.name = "tpgs.time_recursive",
 		.private = offsetof(struct tpgs_group, stats.time),
-		.seq_show = tppg_print_stat_recursive,
+		.seq_show = tpgg_print_stat_recursive,
 	},
 	{
 		.name = "tpgs.sectors_recursive",
 		.private = offsetof(struct tpgs_group, stats.sectors),
-		.seq_show = tppg_print_stat_recursive,
+		.seq_show = tpgg_print_stat_recursive,
 	},
 	{
 		.name = "tpgs.io_service_bytes_recursive",
 		.private = offsetof(struct tpgs_group, stats.service_bytes),
-		.seq_show = tppg_print_rwstat_recursive,
+		.seq_show = tpgg_print_rwstat_recursive,
 	},
 	{
 		.name = "tpgs.io_serviced_recursive",
 		.private = offsetof(struct tpgs_group, stats.serviced),
-		.seq_show = tppg_print_rwstat_recursive,
+		.seq_show = tpgg_print_rwstat_recursive,
 	},
 	{
 		.name = "tpgs.io_service_time_recursive",
 		.private = offsetof(struct tpgs_group, stats.service_time),
-		.seq_show = tppg_print_rwstat_recursive,
+		.seq_show = tpgg_print_rwstat_recursive,
 	},
 	{
 		.name = "tpgs.io_wait_time_recursive",
 		.private = offsetof(struct tpgs_group, stats.wait_time),
-		.seq_show = tppg_print_rwstat_recursive,
+		.seq_show = tpgg_print_rwstat_recursive,
 	},
 	{
 		.name = "tpgs.io_merged_recursive",
 		.private = offsetof(struct tpgs_group, stats.merged),
-		.seq_show = tppg_print_rwstat_recursive,
+		.seq_show = tpgg_print_rwstat_recursive,
 	},
 	{
 		.name = "tpgs.io_queued_recursive",
 		.private = offsetof(struct tpgs_group, stats.queued),
-		.seq_show = tppg_print_rwstat_recursive,
+		.seq_show = tpgg_print_rwstat_recursive,
 	},
 	{ }	/* terminate */
 };
 
 
-static void tppg_stats_init(struct tppg_stats *stats)
+static void tpgg_stats_init(struct tpgg_stats *stats)
 {
 	blkg_rwstat_init(&stats->service_bytes);
 	blkg_rwstat_init(&stats->serviced);
@@ -1151,27 +1151,27 @@ static void tppg_stats_init(struct tppg_stats *stats)
 // operation
 static void tpgs_pd_init(struct blkcg_gq *blkg)
 {
-	struct tpgs_group *tppg = blkg_to_tppg(blkg);
+	struct tpgs_group *tpgg = blkg_to_tpgg(blkg);
 
-	tpgs_init_tppg_base(tppg);
-	tppg->weight = blkg->blkcg->cfq_weight;
-	tppg->leaf_weight = blkg->blkcg->cfq_leaf_weight;
+	tpgs_init_tpgg_base(tpgg);
+	tpgg->weight = blkg->blkcg->cfq_weight;
+	tpgg->leaf_weight = blkg->blkcg->cfq_leaf_weight;
 	// TMP
-	tppg_stats_init(&tppg->stats);
-	tppg_stats_init(&tppg->dead_stats);
+	tpgg_stats_init(&tpgg->stats);
+	tpgg_stats_init(&tpgg->dead_stats);
 }
 
-static inline struct tpgs_group *tppg_parent(struct tpgs_group *tppg)
+static inline struct tpgs_group *tpgg_parent(struct tpgs_group *tpgg)
 {
-	struct blkcg_gq *pblkg = tppg_to_blkg(tppg)->parent;
+	struct blkcg_gq *pblkg = tpgg_to_blkg(tpgg)->parent;
 
-	return pblkg ? blkg_to_tppg(pblkg) : NULL;
+	return pblkg ? blkg_to_tpgg(pblkg) : NULL;
 }
 
 
 
 
-static void tppg_stats_reset(struct tppg_stats *stats)
+static void tpgg_stats_reset(struct tpgg_stats *stats)
 {
 	/* queued stats shouldn't be cleared */
 	blkg_rwstat_reset(&stats->service_bytes);
@@ -1183,7 +1183,7 @@ static void tppg_stats_reset(struct tppg_stats *stats)
 }
 
 /* @to += @from */
-static void tppg_stats_merge(struct tppg_stats *to, struct tppg_stats *from)
+static void tpgg_stats_merge(struct tpgg_stats *to, struct tpgg_stats *from)
 {
 	/* queued stats shouldn't be cleared */
 	blkg_rwstat_merge(&to->service_bytes, &from->service_bytes);
@@ -1203,44 +1203,44 @@ static void tppg_stats_merge(struct tppg_stats *to, struct tppg_stats *from)
 #endif
 }
 
-static void tppg_stats_xfer_dead(struct tpgs_group *tppg)
+static void tpgg_stats_xfer_dead(struct tpgs_group *tpgg)
 {
-	struct tpgs_group *parent = tppg_parent(tppg);
+	struct tpgs_group *parent = tpgg_parent(tpgg);
 
-	lockdep_assert_held(tppg_to_blkg(tppg)->q->queue_lock);
+	lockdep_assert_held(tpgg_to_blkg(tpgg)->q->queue_lock);
 
 	if (unlikely(!parent))
 		return;
 
-	tppg_stats_merge(&parent->dead_stats, &tppg->stats);
-	tppg_stats_merge(&parent->dead_stats, &tppg->dead_stats);
-	tppg_stats_reset(&tppg->stats);
-	tppg_stats_reset(&tppg->dead_stats);
+	tpgg_stats_merge(&parent->dead_stats, &tpgg->stats);
+	tpgg_stats_merge(&parent->dead_stats, &tpgg->dead_stats);
+	tpgg_stats_reset(&tpgg->stats);
+	tpgg_stats_reset(&tpgg->dead_stats);
 }
 
 static void tpgs_pd_offline(struct blkcg_gq *blkg)
 {
-	struct tpgs_group *tppg = blkg_to_tppg(blkg);
+	struct tpgs_group *tpgg = blkg_to_tpgg(blkg);
 	/*
 	 * @blkg is going offline and will be ignored by
 	 * blkg_[rw]stat_recursive_sum().  Transfer stats to the parent so
 	 * that they don't get lost.  If IOs complete after this point, the
 	 * stats for them will be lost.  Oh well...
 	 */
-	tppg_stats_xfer_dead(tppg);
+	tpgg_stats_xfer_dead(tpgg);
 
-	if (!list_empty(&tppg->tppd_node))
-		list_del_init(&tppg->tppd_node);
+	if (!list_empty(&tpgg->tppd_node))
+		list_del_init(&tpgg->tppd_node);
 
-	//BUG_ON(!list_empty(&(tppg->queue_list)));
+	//BUG_ON(!list_empty(&(tpgg->queue_list)));
 }
 
 static void tpgs_pd_reset_stats(struct blkcg_gq *blkg)
 {
-	struct tpgs_group *tppg = blkg_to_tppg(blkg);
+	struct tpgs_group *tpgg = blkg_to_tpgg(blkg);
 
-	tppg_stats_reset(&tppg->stats);
-	tppg_stats_reset(&tppg->dead_stats);
+	tpgg_stats_reset(&tpgg->stats);
+	tpgg_stats_reset(&tpgg->dead_stats);
 }
 
 static struct blkcg_policy blkcg_policy_tpgs = {

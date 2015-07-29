@@ -1,17 +1,36 @@
 * TPGS I/O Scheduler Reading Memo
 ** data structure
 -struct kmem_cache *tpgs_pool
+tppqの確保の為のプール場所
 
 -struct tpgs_queue
 オンラインかどうか
 リクエストを保持しているかどうか
 などを保持している
+ref 参照カウンタ
+tppd 属しているtpgs_data
+tppg_node tpgs_groupグループのメンバlist_head
+sort_list 実際のリクエストを保持している部分 tpgs_queueの本体(list_head)
+tppg 属しているグループtpgs_group
+pid 
+online tpgqがaddされる前0
+rq_queued リクエストされている数
 
 -struct tppg_stats
 統計情報を保持
 
 -struct tpgs_group
 デバイス毎のcgroupsの構造
+pd おかざり？blkg_policy_data
+tppd_node
+cur_dispatcher
+needs_update いつtrueになるか不明
+queue_list
+nt_tpgq tpgs_del_queue()でデクリメント tpgs_add_queue()でインクリメント
+rq_queued グループにキューイングされている数
+rq_in_driver ドライバに託されているリクエストの数
+stats
+dead_stats
 
 
 -struct tpgs_io_cq
@@ -20,6 +39,14 @@ I/Oコンテキストとキューをとりもつ
 -struct tpgs_data
 メインデータを保持している
 リクエストキューだったりを保持
+busy_queues tpgs_del_queueでデクリメント tpgs_add_queueでインクリメント
+dispatched tpgs_insert_requestでインクリメントtpgs_dispatch_requests_nr()で現象
+total_wight add queueで増加 del queueで減少
+
+
+-blkcg_gq(blkg)
+block cgroup(blkcg)と request_queue(q)の関係
+blkcgポリシーによって、blkcgとqのペアの情報を追うのに使われる
 
 ** helper functions
 ** Elevator API's
@@ -52,9 +79,12 @@ rq_in_driverが０ならtpgs_scheduler_dispatch()
 
 *** elevator_init_icq_fn
 io_cqを作成してリンクする際(ioc_create_icq())に呼ばれる
+do Nothing()
 
 *** elevator_exit_icq_fn
 io_cqを破棄する際に呼ばれる
+tpgs_put_queue()
+
 *** elevator_set_req_fn tpgs_set_request
 リクエストの為にスケジューラ内のデータを確保する際に呼ばれる
 
