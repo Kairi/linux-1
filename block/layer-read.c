@@ -17,18 +17,18 @@ static const int write_expire = 5 * HZ; /* ditto for writes, these limits are SO
 static const int writes_starved = 2;    /* max times reads can starve a write */
 static const int fifo_batch = 16;       /* # of sequential requests treated as one
 				     by the above parameters. For throughput. */
+#define FLASH_CHIP_NUM 8
+#define DEVICE_SIZE 1024 * 1024 * 1024 * 64 // 64GB
+
+// this is used for READ requests ONLY.
+struct sub_layer {
+	struct list_head read_fifo_list;
+	struct rb_root read_sort_list;
+};
 
 struct lr_data {
-	/*
-	 * run time data
-	 */
-
-	/*
-	 * requests (lr_rq s) are present on both sort_list and fifo_list
-	 */
-	struct rb_root sort_list[2];	
-	struct list_head fifo_list[2];
-
+	struct list_head write_fifo_list; // this is used for WRITE ONLY
+	struct sub_layer sl[FLASH_CHIP_NUM * 2]; 
 	/*
 	 * next in sort order. read, write or both are NULL
 	 */
@@ -46,12 +46,15 @@ struct lr_data {
 };
 
 static void lr_move_request(struct lr_data *, struct request *);
+static inline int lr_get_sl_idx(struct request *rq);
 
 static inline struct rb_root *
-lr_rb_root(struct lr_data *dd, struct request *rq)
+lr_rb_root(struct lr_data *ld, struct request *rq)
 {
-	return &dd->sort_list[rq_data_dir(rq)];
+	int idx = lr_get_sl_idx(rq);	
+	return &ld->sublayer[idx].read_sort_list;
 }
+
 
 /*
  * get the request after `rq' in sector-sorted order
@@ -67,54 +70,70 @@ lr_latter_request(struct request *rq)
 	return NULL;
 }
 
-static void
-lr_add_rq_rb(struct lr_data *dd, struct request *rq)
-{
-	struct rb_root *root = lr_rb_root(dd, rq);
-
-	elv_rb_add(root, rq);
-}
 
 static inline void
-lr_del_rq_rb(struct lr_data *dd, struct request *rq)
+lr_del_rq_rb(struct lr_data *ld, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
 
 	if (dd->next_rq[data_dir] == rq)
 		dd->next_rq[data_dir] = lr_latter_request(rq);
 
-	elv_rb_del(lr_rb_root(dd, rq), rq);
+	elv_rb_del(lr_rb_root(ld, rq), rq);
 }
+
+static inline int
+lr_get_sl_idx(struct request *rq)
+{
+	const int sector = blk_rq_sectors(rq);
+	int idx = (int)(sector / (DEVICE_SECTOR / (2 * FLASH_CHIP_NUM) + 1));
+	return idx;
+}
+
 
 /*
  * add rq to rbtree and fifo
+ * registerd to elevator_add_req_fn
  */
 static void
 lr_add_request(struct request_queue *q, struct request *rq)
 {
 	struct lr_data *dd = q->elevator->elevator_data;
 	const int data_dir = rq_data_dir(rq);
+	int idx;
+		
+	rq->fifo_time = jiffies + dd->fifo_expire[data_dir];	
 
-	lr_add_rq_rb(dd, rq);
-
-	/*
-	 * set expire time and add to fifo list
-	 */
-	rq->fifo_time = jiffies + dd->fifo_expire[data_dir];
-	list_add_tail(&rq->queuelist, &dd->fifo_list[data_dir]);
+	if(data_dir == WRITE) { // write is fifo only
+		list_add_tail(&rq->queuelist, &dd->write_fifo_list); 
+	} else { //read only sub layer
+		idx = lr_get_sl_idx(rq);		
+		elv_rb_add(&dd->sub_layer[idx].read_sort_list, rq);
+		list_add_tail(&rq->queuelist, &dd->sub_layer[idx].read_fifo_list);
+	}
 }
 
-/*
- * remove rq from rbtree and fifo.
- */
 static void lr_remove_request(struct request_queue *q, struct request *rq)
 {
-	struct lr_data *dd = q->elevator->elevator_data;
-
+	struct lr_data *ld = q->elevator->elevator_data;
+	const int data_dir = rq_data_dir(rq);
+	int idx;
+	
 	rq_fifo_clear(rq);
-	lr_del_rq_rb(dd, rq);
+	
+	if (dd->next_rq[data_dir] == rq)
+		dd->next_rq[data_dir] = lr_latter_request(rq);
+	
+	if(data_dir == READ) { // if read only
+		idx = lr_get_sl_idx(rq);		
+		elv_rb_del(lr_rb_root(ld, rq), rq);		
+	}
 }
 
+
+/*
+  change from deadline to this scheduler do no merge.
+ */
 static int
 lr_merge(struct request_queue *q, struct request **req, struct bio *bio)
 {
@@ -146,10 +165,9 @@ lr_merged_requests(struct request_queue *q, struct request *req,
  * move request from sort list to dispatch queue.
  */
 static inline void
-lr_move_to_dispatch(struct lr_data *dd, struct request *rq)
+lr_move_to_dispatch(struct lr_data *ld, struct request *rq)
 {
 	struct request_queue *q = rq->q;
-
 	lr_remove_request(q, rq);
 	elv_dispatch_add_tail(q, rq);
 }
@@ -158,7 +176,7 @@ lr_move_to_dispatch(struct lr_data *dd, struct request *rq)
  * move an entry to dispatch queue
  */
 static void
-lr_move_request(struct lr_data *dd, struct request *rq)
+lr_move_request(struct lr_data *ld, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
 
@@ -172,17 +190,34 @@ lr_move_request(struct lr_data *dd, struct request *rq)
 	 * take it off the sort and fifo list, move
 	 * to dispatch queue
 	 */
-	lr_move_to_dispatch(dd, rq);
+	lr_move_to_dispatch(ld, rq);
 }
 
 /*
  * lr_check_fifo returns 0 if there are no expired requests on the fifo,
  * 1 otherwise. Requires !list_empty(&dd->fifo_list[data_dir])
  */
-static inline int lr_check_fifo(struct lr_data *dd, int ddir)
-{
-	struct request *rq = rq_entry_fifo(dd->fifo_list[ddir].next);
 
+// NOT completed
+static inline int lr_check_fifo(struct lr_data *ld, int ddir)
+{
+	struct request *rq = NULL;
+	
+	if(ddir == WRITE) {
+		*rq = rq_entry_fifo(ld->write_fifo_list[ddir].next);
+	} else {
+		int i;
+		for (i = 0; i < FLASH_CHIP_NUM * 2; i++) {
+			*rq = rq_entry_fifo(ld->sublayer[i].read_fifo_list.next);
+			if (rq)
+				break;
+		}
+
+	}
+	
+		
+	 
+		
 	/*
 	 * rq is expired!
 	 */
@@ -282,12 +317,14 @@ dispatch_request:
 
 static void lr_exit_queue(struct elevator_queue *e)
 {
-	struct lr_data *dd = e->elevator_data;
+	struct lr_data *ld = e->elevator_data;
 
-	BUG_ON(!list_empty(&dd->fifo_list[READ]));
-	BUG_ON(!list_empty(&dd->fifo_list[WRITE]));
+	BUG_ON(!list_empty(&ld->read_fifo_list));
+	for (int i = 0; i < FLASH_CHIP_NUM * 2; i++) {
+		BUG_ON(!list_empty(&ld->sublayer[i].write_fifo_list));
+	}
 
-	kfree(dd);
+	kfree(ld);
 }
 
 /*
@@ -295,24 +332,29 @@ static void lr_exit_queue(struct elevator_queue *e)
  */
 static int lr_init_queue(struct request_queue *q, struct elevator_type *e)
 {
-	struct lr_data *dd;
+	struct lr_data *ld;
 	struct elevator_queue *eq;
-
+	int i;
+	
 	eq = elevator_alloc(q, e);
 	if (!eq)
 		return -ENOMEM;
 
-	dd = kzalloc_node(sizeof(*dd), GFP_KERNEL, q->node);
-	if (!dd) {
+	ld = kzalloc_node(sizeof(*dd), GFP_KERNEL, q->node);
+	if (!ld) {
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
 	}
-	eq->elevator_data = dd;
+	eq->elevator_data = ld;
 
-	INIT_LIST_HEAD(&dd->fifo_list[READ]);
-	INIT_LIST_HEAD(&dd->fifo_list[WRITE]);
-	dd->sort_list[READ] = RB_ROOT;
-	dd->sort_list[WRITE] = RB_ROOT;
+//	INIT_LIST_HEAD(&dd->fifo_list[READ]);
+//	INIT_LIST_HEAD(&dd->fifo_list[WRITE]);
+	INIT_LIST_HEAD(&ld->write_fifo_list); // for write only
+
+	for (i = 0; i < FLASH_CHIP_NUM * 2; i++) {
+		dd->sub_layer[i].read_sort_list = RB_ROOT;
+		INIT_LIST_HEAD(&dd->sub_layer[i].read_fifo_list);	
+	}
 	dd->fifo_expire[READ] = read_expire;
 	dd->fifo_expire[WRITE] = write_expire;
 	dd->writes_starved = writes_starved;
