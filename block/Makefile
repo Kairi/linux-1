@@ -27,6 +27,7 @@ obj-$(CONFIG_IOSCHED_LB)	+= lb-iosched.o
 obj-$(CONFIG_IOSCHED_FIFO)	+= fifo-iosched.o
 obj-$(CONFIG_IOSCHED_TPPS)	+= tpps-iosched.o
 obj-$(CONFIG_IOSCHED_GFQ)	+= gfq-iosched.o
+obj-$(CONFIG_IOSCHED_LR)	+= layer-read-iosched.o
 
 
 obj-$(CONFIG_BLOCK_COMPAT)	+= compat_ioctl.o

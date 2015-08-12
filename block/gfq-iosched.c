@@ -3437,7 +3437,7 @@ static void gfq_init_prio_data(struct gfq_queue *gfqq, struct gfq_io_cq *cic)
 	struct task_struct *tsk = current;
 	int ioprio_class;
 
-	if (!gfq_gfqq_prio_changed(gfqq))
+	if (!gfq_gfqq_prio_changed(gfqq)) // ?
 		return;
 
 	ioprio_class = IOPRIO_PRIO_CLASS(cic->ioprio);

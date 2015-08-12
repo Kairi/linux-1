@@ -114,6 +114,11 @@ config IOSCHED_TPPS
 	  The TPPS I/O scheduler tries to distribute iops proportional
 	  among all cgroups in the system. It should also provide a low
 	  latency working environment, suitable for flash-based device.
+config IOSCHED_LR
+	tristate "Layer Read I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.
 
 choice
 	prompt "Default I/O scheduler"

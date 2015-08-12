@@ -252,10 +252,11 @@ static int lb_dispatch_bundle(struct lb_data *ld, struct request *rq)
 		rq_fifo_clear(rq);
 		elv_dispatch_add_tail(rq->q, rq);
 	}
+	/*
 	spin_lock_irq(rq->q->queue_lock);
 	__blk_run_queue(rq->q);
 	spin_unlock_irq(rq->q->queue_lock);
-	
+	*/
 	ld->fifo_size[ASYNC][WRITE] = 0;
 	return 1;
 }
