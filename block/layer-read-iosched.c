@@ -21,6 +21,7 @@ static const int fifo_batch = 16;       /* # of sequential requests treated as o
 #define SL_NUM FLASH_CHIP_NUM * 2
 #define DEVICE_SIZE ((long)1024 * 1024 * 1024 * 64) // 64GB
 
+
 // this is used for READ requests ONLY.
 struct sub_layer {
 	struct list_head read_fifo_list;
@@ -52,6 +53,20 @@ struct lr_data {
 static void lr_move_request(struct lr_data *, struct request *);
 static inline int lr_get_sl_idx(struct request *rq);
 
+static inline void lr_puts_data(struct lr_data *ld)
+{
+	printk("KERN_DEBUG mode=%d batch_read=%d batch_write=%d", ld->mode, ld->batch_read, ld->batch_write);
+	printk("KERN_DEBUG write fifo list");
+	struct list_head *pos;
+	
+	list_for_each(pos, &ld->write_fifo_list)
+	{
+		printk("KERN_DEBUG next=%p, prev=%p", pos->next, pos->prev);
+	}
+	
+}
+
+
 static inline struct rb_root *
 lr_rb_root(struct lr_data *ld, struct request *rq)
 {
@@ -74,7 +89,8 @@ lr_rb_root(struct lr_data *ld, struct request *rq)
 static inline struct request *
 lr_latter_request(struct lr_data *ld, struct request *rq)
 {
-	struct rb_node *node = rb_next(&rq->rb_node);
+	
+	struct rb_node *node;
 	const int data_dir = rq_data_dir(rq);
 	int idx, i;
 	
@@ -82,10 +98,15 @@ lr_latter_request(struct lr_data *ld, struct request *rq)
 		if(!list_empty(&ld->write_fifo_list))
 			return rq_entry_fifo(&ld->write_fifo_list);
 	} else { // if read
+		node = rb_next(&rq->rb_node);
+		if(node) 
+			return rb_entry_rq(node);
+		
 		idx = lr_get_sl_idx(rq);
-		for(i = idx; i < SL_NUM; i ++) {
-			if(!list_empty(&ld->sl[i].read_sort_list))
-			   return rb_entry_rq(ld->sl[i].read_sort_list);
+		for(i = idx + 1; i < SL_NUM; i ++) { // if sub layer is empty
+			node = rb_first(&ld->sl[idx].read_sort_list);
+			if(node)
+				return rb_entry_rq(node);
 		}
 	}
 	return NULL;
@@ -109,12 +130,16 @@ lr_del_rq_rb(struct lr_data *ld, struct request *rq)
 	const int data_dir = rq_data_dir(rq);
 	struct rb_root *root;
 	int idx;
-	
-	if (data_dir == WRITE)
-		return;
+	printk("KERN_DEBUG lr_del_rq_rb\n");
 		
 	if (ld->next_rq[data_dir] == rq)
 		ld->next_rq[data_dir] = lr_latter_request(ld, rq);
+
+	if (data_dir == WRITE) {
+		return;
+	}
+	
+		
 
 	if (data_dir == READ) {
 		idx = lr_get_sl_idx(rq);
@@ -124,15 +149,15 @@ lr_del_rq_rb(struct lr_data *ld, struct request *rq)
 	if (root != NULL) {
 		elv_rb_del(root, rq);
 	}
-	
 }
 
-// 不安
+	
+
 static inline int
 lr_get_sl_idx(struct request *rq)
 {
 	const int sector = blk_rq_sectors(rq);
-	int idx = (int)(sector / ((long)DEVICE_SIZE / (2 * FLASH_CHIP_NUM) + 1));
+	int idx = (int)(sector / (DEVICE_SIZE / (2 * FLASH_CHIP_NUM) + 1));
 	return idx;
 }
 
@@ -147,25 +172,26 @@ lr_add_request(struct request_queue *q, struct request *rq)
 	struct lr_data *ld = q->elevator->elevator_data;
 	const int data_dir = rq_data_dir(rq);
 	int idx;
-		
+
+
+
 	rq->fifo_time = jiffies + ld->fifo_expire[data_dir];	
 
 	if(data_dir == WRITE) { // write is fifo only
+		printk("KERN_DEBUG lr_add_request(insert write)\n");
 		list_add_tail(&rq->queuelist, &ld->write_fifo_list); 
 	} else { //read only sub layer
+		printk("KERN_DEBUG lr_add_request(insert read)\n");
 		idx = lr_get_sl_idx(rq);		
 		elv_rb_add(&ld->sl[idx].read_sort_list, rq); // insert sorted list
 		list_add_tail(&rq->queuelist, &ld->sl[idx].read_fifo_list); // insert fifo list
 	}
 }
 
-// TODO:add delete from fifo list
 static void lr_remove_request(struct request_queue *q, struct request *rq)
 {
 	struct lr_data *ld = q->elevator->elevator_data;
-	const int data_dir = rq_data_dir(rq);
-	int idx;
-	
+	printk("KERN_DEBUG lr_remove_request\n");
 	rq_fifo_clear(rq);
 	lr_del_rq_rb(ld, rq);
 }
@@ -226,6 +252,8 @@ static inline void
 lr_move_to_dispatch(struct lr_data *ld, struct request *rq)
 {
 	struct request_queue *q = rq->q;
+	printk("KERN_DEBUG lr_move_to_dispatch\n");
+	
 	lr_remove_request(q, rq);
 	elv_dispatch_add_tail(q, rq);
 }
@@ -238,9 +266,11 @@ lr_move_request(struct lr_data *ld, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
 
+	printk("KERN_DEBUG lr_move_request\n");
+	
 	ld->next_rq[READ] = NULL;
 	ld->next_rq[WRITE] = NULL;
-	ld->next_rq[data_dir] = lr_latter_request(rq);
+	ld->next_rq[data_dir] = lr_latter_request(ld, rq);
 
 	ld->last_sector = rq_end_sector(rq);
 
@@ -287,8 +317,9 @@ static inline int lr_check_fifo(struct lr_data *ld, int ddir)
  */
 static inline struct request *lr_check_sub_layer(struct lr_data *ld, int pre_idx) 
 {
-	int i, cnt;
-	struct request *first_rq_in_fifo, *first_rq_in_tree;
+	int i, cnt = 0;	
+	struct request *first_rq_in_fifo = NULL;
+	struct request  *first_rq_in_tree = NULL; 
 	
 	for (i = pre_idx; i < SL_NUM; i++) {
 		if (!list_empty(&ld->sl[i].read_fifo_list)) {
@@ -326,28 +357,25 @@ static inline struct request *lr_check_sub_layer(struct lr_data *ld, int pre_idx
 static int lr_dispatch_requests(struct request_queue *q, int force)
 {
 	struct lr_data *ld = q->elevator->elevator_data;
-//	const int reads = !list_empty(&ld->fifo_list[READ]);
-//	const int writes = !list_empty(&ld->fifo_list[WRITE]);
 	struct request *rq;
-	static int idx, mode;
+	static int idx;
+//	lr_puts_data(ld);
 	
-	/*
-	 * batches are currently reads XOR writes
-	 */
+//	printk("KERN_DEBUG lr_dispatch_requests\n");
 
-// dispatch reads before write
 	if (ld->next_rq[READ]) 
 		rq = ld->next_rq[READ];
-
+	
 	if (!rq) {
-		if(mode == WRITE)
+		if(ld->mode == WRITE)
 			goto dispatch_writes;
 
 		goto dispatch_layer;
 	}
 
 	
-dispatch_layer: // dispatch sub layer
+dispatch_layer: // dispatch sub layer(read)
+//	printk("KERN_DEBUG dispatch_layer\n");
 	rq = lr_check_sub_layer(ld, idx);
 	if(!rq) {// all sub layer is empty or exceed batch_read
 		ld->batching = 0;
@@ -362,28 +390,33 @@ dispatch_layer: // dispatch sub layer
 	
 
 dispatch_writes: // dipatch write request
+//	printk("KERN_DEBUG dispatch_writes\n");
 	ld->batch_read = 0;
 	if (ld->next_rq[WRITE])
 		rq = ld->next_rq[WRITE];
 
 	if (!rq)
-		rq = list_entry(&ld->write_fifo_list, struct request, queuelist);
-	
-	if (rq && ld->batching < ld->batch_write) // exist request && NOT Excess batch limit.
-		/* we have a next request are still entitled to batch */
-		goto dispatch_request;
+		rq = list_entry(ld->write_fifo_list.next, struct request, queuelist);
 
-	mode = READ;
-	return 0;
+	if(rq)
+		printk("KERN_DEBUG exist write req\n");
+	
+	
+	if (!rq || ld->batching > ld->batch_write) {// exist request && NOT Excess batch limit./* we have a next request are still entitled to batch */
+		ld->mode = READ;
+		printk("KERN_DEBUG end dispatch_writes\n");
+		return 0;
+	}
 
 dispatch_request:
+//	printk("KERN_DEBUG dispatch_request\n");
 	/*
 	 * rq is the selected appropriate request.
 	 */
 	ld->batching++;
 	lr_move_request(ld, rq);
 
-	return 1;
+	return 0;
 }
 
 static void lr_exit_queue(struct elevator_queue *e)
