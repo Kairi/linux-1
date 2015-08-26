@@ -15,15 +15,16 @@
 static const int read_expire = HZ / 2;	/* max time before a read is submitted. */
 static const int write_expire = 5 * HZ;	/* ditto for writes, these limits are SOFT! */
 static const int writes_starved = 2;	/* max times reads can starve a write */
-static const int fifo_batch = 16;	/* # of sequential requests treated as one
-									   by the above parameters. For throughput. */
-static const unsigned long device_byte_size =  ((long)1024 * 1024 * 1024 * 64);
+static const int batch_read = 16;
+static const int batch_write = 8;
+
+//static const int fifo_batch = 16;	/* # of sequential requests treated as one
+//					   by the above parameters. For throughput. */
+static const unsigned long device_byte_size = ((long)1024 * 1024 * 1024 * 64);
 
 #define FLASH_CHIP_NUM 8
 #define SL_NUM FLASH_CHIP_NUM * 2
 
-
-// sub_layer is used for READ requests ONLY.
 struct sub_layer {
 	struct list_head read_fifo_list;
 	struct rb_root read_sort_list;
@@ -38,38 +39,33 @@ struct lr_data {
 	struct request *next_rq[2];
 	unsigned int batching;	/* number of sequential requests made */
 	sector_t last_sector;	/* head position */
-	unsigned int starved;	/* times reads have starved writes */
 
 	/*
 	 * settings that change how the i/o scheduler behaves
 	 */
 	int mode;		// write or read 
-	int fifo_expire[2];
-	int fifo_batch;
+	int fifo_expire[2];	// limit time
 	int batch_read;
 	int batch_write;
-	int writes_starved;
 	int cnt;		// dispatch in same layer count
 	int pre_idx;		// pre dispatched sub layer index
+	int pre_rq_dir;
 };
 
 static void lr_move_request(struct lr_data *, struct request *);
 static inline int lr_get_sl_idx(struct request *rq);
 
-static inline struct rb_root *
-lr_rb_root(struct lr_data *ld, struct request *rq)
+static inline struct rb_root *lr_rb_root(struct lr_data *ld, struct request *rq)
 {
 	int idx;
 	const int data_dir = rq_data_dir(rq);
-
-//	printk("KERN_DEBUG lr_rb_root\n");
 
 	if (data_dir == READ) {
 		idx = lr_get_sl_idx(rq);
 		return &ld->sl[idx].read_sort_list;
 	}
 
-	return NULL;		// if write
+	return NULL;
 }
 
 /*
@@ -77,86 +73,104 @@ lr_rb_root(struct lr_data *ld, struct request *rq)
  * when `rq' is write ,get the request after `rq' in time-sorted order.
  * when all queue is empty, return NULL.
  */
-static inline struct request *
-lr_latter_request(struct lr_data *ld, struct request *rq)
+static inline struct request *lr_latter_request(struct lr_data *ld,
+						struct request *rq)
 {
-	struct rb_node *node;
+	struct rb_node *node = NULL;
 	const int data_dir = rq_data_dir(rq);
 	int idx, i;
 
-//	printk("KERN_DEBUG lr_latter_request\n");
-
-	if (data_dir == WRITE) {	//if request type is write
-		if (!list_empty(&ld->write_fifo_list))
-			return rq_entry_fifo(ld->write_fifo_list.next);
-	} else {		// if request type is read
+	printk("KERN_DEBUG latter_rq\n");
+	if (data_dir == WRITE) {
+//		if (!list_empty(&ld->write_fifo_list))
+		if(rq->queuelist.next == &ld->write_fifo_list)
+			return NULL;
+		return rq_entry_fifo(ld->write_fifo_list.next);
+	} else {
+		struct rb_node *tmp_node = &rq->rb_node;
+		do {
+			printk("KERN_DEBUG original rq:%p", rq);
+			printk("KERN_DEBUG rb_entry_rq(tmp_node):%p", rb_entry_rq(tmp_node));
+		}while(tmp_node = rb_next(tmp_node));
+		
 		node = rb_next(&rq->rb_node);
+		
 
-		if (node)
+		if (node) {
+			printk("KERN_DEBUG latter_request first return\n");
 			return rb_entry_rq(node);
+		}
+
+		return NULL;
 
 		idx = lr_get_sl_idx(rq);
 		for (i = idx + 1; i < SL_NUM; i++) {	// if rq's sub layer is empty
 			node = rb_first(&ld->sl[idx].read_sort_list);
-			if (node)
+			if (node) {
+				printk("KERN_DEBUG latter_request first return\n");
 				return rb_entry_rq(node);
+			}
 		}
-		if (idx != 0) {
-			for (i = 0; i < idx; i++) {
-				node = rb_first(&ld->sl[idx].read_sort_list);
-				if (node)
-					return rb_entry_rq(node);
+
+		for (i = 0; i < idx; i++) {
+			node = rb_first(&ld->sl[idx].read_sort_list);
+			if (node) {
+				printk("KERN_DEBUG latter_request first return\n");
+				return rb_entry_rq(node);
 			}
 		}
 	}
-//	printk("KERN_DEBUG lr_latter_request: all queue is empty. returns null");
 
 	return NULL;
+
 }
 
-// register rq to adequate tree
+/*
+ * register ONLY READ rq to adequate tree
+ */
 static void lr_add_rq_rb(struct lr_data *ld, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
 	struct rb_root *root;
 
-//	printk("KERN_DEBUG lr_add_rq_rb\n");
 	if (data_dir == READ) {
 		root = lr_rb_root(ld, rq);
 		elv_rb_add(root, rq);
 	}
 }
 
-// unregister read rq from tree and change next rq
+/*
+ * unregister read rq from tree and change next rq
+ */
 static inline void lr_del_rq_rb(struct lr_data *ld, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
 	struct rb_root *root;
 	int idx;
-//	printk("KERN_DEBUG lr_del_rq_rb\n");
 
 	if (ld->next_rq[data_dir] == rq)
 		ld->next_rq[data_dir] = lr_latter_request(ld, rq);
 
-	if (data_dir == WRITE) {	// ayasii
+	if (data_dir == WRITE)
 		return;
-	}
 
-	if (data_dir == READ) {
-		idx = lr_get_sl_idx(rq);
-	}
-
+	idx = lr_get_sl_idx(rq);
 	root = lr_rb_root(ld, rq);
 	if (root) {
 		elv_rb_del(root, rq);
 	}
 }
 
+/*
+ * return rq's adequate sublayer index
+ */
 static inline int lr_get_sl_idx(struct request *rq)
 {
 	const int sector = blk_rq_pos(rq);
-	int idx = (int)(sector / (device_byte_size / (2 * FLASH_CHIP_NUM) + 1));
-	printk("KERN_DEBUG sector:%d DEVICE_BYTE_SIZE:%10lu FLASH_CHIP_NUM:%d index:%d\n",sector, device_byte_size, FLASH_CHIP_NUM, idx);
+	int idx = (int)(sector / (device_byte_size / (2 * FLASH_CHIP_NUM) + 1)); //NEED check
+	/* printk */
+	/*     ("KERN_DEBUG sector:%d DEVICE_BYTE_SIZE:%10lu FLASH_CHIP_NUM:%d index:%d\n", */
+	/*      sector, device_byte_size, FLASH_CHIP_NUM, idx); */
 	return idx;
 }
 
@@ -170,22 +184,28 @@ static void lr_add_request(struct request_queue *q, struct request *rq)
 	const int data_dir = rq_data_dir(rq);
 	int idx;
 
-//	printk("KERN_DEBUG lr_add_request\n");
-
 	rq->fifo_time = jiffies + ld->fifo_expire[data_dir];
 
-	if (data_dir == WRITE) {	// write is fifo only
+	if (data_dir == WRITE) {
 		printk("KERN_DEBUG lr_add_request(insert write)\n");
 		list_add_tail(&rq->queuelist, &ld->write_fifo_list);
-	} else {		//read only sub layer
+	} else {
 		printk("KERN_DEBUG lr_add_request(insert read)\n");
 		idx = lr_get_sl_idx(rq);
-		elv_rb_add(&ld->sl[idx].read_sort_list, rq);	// insert sorted list
+		lr_add_rq_rb(ld, rq);
+//		elv_rb_add(&ld->sl[idx].read_sort_list, rq);	// insert sorted list
 		list_add_tail(&rq->queuelist, &ld->sl[idx].read_fifo_list);	// insert fifo list
 	}
 }
 
-// remove req
+static int lr_allow_merge(struct request_queue *q, struct request *rq, struct bio *bio)
+{
+	return ELEVATOR_NO_MERGE;
+}
+
+/*
+ * remove request
+ */
 static void lr_remove_request(struct request_queue *q, struct request *rq)
 {
 	struct lr_data *ld = q->elevator->elevator_data;
@@ -209,7 +229,7 @@ static void lr_merged_request(struct request_queue *q,
 	struct lr_data *ld = q->elevator->elevator_data;
 	struct rb_root *root;
 
-//	printk("KERN_DEBUG lr_merged_request\n");
+      printk("KERN_DEBUG lr_merged_request\n");
 	/*
 	 * if the merge was a front merge, we need to reposition request
 	 */
@@ -226,7 +246,7 @@ static void
 lr_merged_requests(struct request_queue *q, struct request *req,
 		   struct request *next)
 {
-//	printk("KERN_DEBUG lr_merged_requests\n");
+      printk("KERN_DEBUG lr_merged_requests\n");
 	/*
 	 * if next expires before rq, assign its expire time to rq
 	 * and move into next position (next will be deleted) in fifo
@@ -245,7 +265,7 @@ lr_merged_requests(struct request_queue *q, struct request *req,
 }
 
 /*
- * move request from sort list to dispatch queue.
+ * move request from scheduler queue to dispatch queue.
  */
 static inline void lr_move_to_dispatch(struct lr_data *ld, struct request *rq)
 {
@@ -261,8 +281,6 @@ static inline void lr_move_to_dispatch(struct lr_data *ld, struct request *rq)
 static void lr_move_request(struct lr_data *ld, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
-
-//	printk("KERN_DEBUG lr_move_request\n");
 
 	ld->next_rq[READ] = NULL;
 	ld->next_rq[WRITE] = NULL;
@@ -280,20 +298,18 @@ static void lr_move_request(struct lr_data *ld, struct request *rq)
 /*
  * lr_check_fifo returns 0 if there are no expired requests on the fifo(read and write),
  * 1 otherwise. Requires !list_empty(&ld->fifo_list[data_dir])
+ UNNECCESARY
  */
-
 static inline int lr_check_fifo(struct lr_data *ld, int ddir)
 {
 	struct request *rq = NULL;
 	int i;
 
-//	printk("KERN_DEBUG lr_check_fifo\n");
-
 	if (ddir == WRITE) {
 		if (!list_empty(&ld->write_fifo_list))
 			rq = rq_entry_fifo(ld->write_fifo_list.next);
-	} else {		// if read
-		for (i = 0; i < FLASH_CHIP_NUM * 2; i++) {
+	} else {
+		for (i = 0; i < SL_NUM; i++) {
 			rq = rq_entry_fifo(ld->sl[i].read_fifo_list.next);
 			if (rq)
 				break;
@@ -311,19 +327,20 @@ static inline int lr_check_fifo(struct lr_data *ld, int ddir)
 	return 0;
 }
 
-/* return  request in sub layer
-   when sub layer is empty or dispatch 8 times in same layer, function retuns  NULL.
+/*
+ * return  request in sub layer
+ * when sub layer is empty or dispatch 8 times in same layer, function retuns  NULL.
  */
 static inline struct request *lr_check_sub_layer(struct lr_data *ld)
 {
 	struct request *first_rq_in_fifo = NULL;
 	struct request *first_rq_in_tree = NULL;
 	int i;
-	printk("KERN_DEBUG lr_check_sub_layer\n");
 
 	for (i = ld->pre_idx; i < SL_NUM; i++) {
 		if (!list_empty(&ld->sl[i].read_fifo_list)) {
-			printk("KERN_DEBUG there is rq in %d th sub layer", i);
+			printk("KERN_DEBUG there is rq in %d th sub layer\n", i);
+			printk("KERN_DEBUG it's rq pointer is %p\n", rq_entry_fifo(ld->sl[i].read_fifo_list.next));
 			if (ld->pre_idx == i) {
 				ld->cnt++;
 			}
@@ -332,7 +349,7 @@ static inline struct request *lr_check_sub_layer(struct lr_data *ld)
 				ld->cnt = 0;
 				continue;
 			}
-		
+
 			first_rq_in_fifo =
 			    rq_entry_fifo(ld->sl[i].read_fifo_list.next);
 			ld->pre_idx = i;
@@ -343,11 +360,14 @@ static inline struct request *lr_check_sub_layer(struct lr_data *ld)
 	if (!first_rq_in_fifo) {
 		for (i = 0; i < ld->pre_idx; i++) {
 			if (!list_empty(&ld->sl[i].read_fifo_list)) {
-				printk("KERN_DEBUG there is rq in %d th sub layer", i);
+				printk
+				    ("KERN_DEBUG there is rq in %d th sub layer",
+				     i);
 				ld->cnt = 1;
 				ld->pre_idx = i;
 				first_rq_in_fifo =
-				    rq_entry_fifo(ld->sl[i].read_fifo_list.next);
+				    rq_entry_fifo(ld->sl[i].read_fifo_list.
+						  next);
 				break;
 			}
 		}
@@ -356,7 +376,7 @@ static inline struct request *lr_check_sub_layer(struct lr_data *ld)
 	}
 
 	if (time_after_eq(jiffies, first_rq_in_fifo->fifo_time))	// rq is expired!
-		return first_rq_in_fifo;	// expired rq
+		return first_rq_in_fifo;	// if expired
 
 	first_rq_in_tree = rb_entry_rq(rb_first(&ld->sl[i].read_sort_list));
 
@@ -369,8 +389,8 @@ static inline struct request *lr_check_sub_layer(struct lr_data *ld)
 static void lr_display_write_requests(struct lr_data *ld)
 {
 	struct request *__rq;
-	int cnt =0;
-	
+	int cnt = 0;
+
 	list_for_each_entry(__rq, &ld->write_fifo_list, queuelist) {
 		printk("write rq in fifo:%p\n", __rq);
 		cnt++;
@@ -382,16 +402,16 @@ static void lr_display_read_requests(struct lr_data *ld)
 {
 	struct request *__rq;
 	int i, cnt = 0;
-	
-	for(i =0; i < SL_NUM; i++) {
+
+	for (i = 0; i < SL_NUM; i++) {
+//		printk("KERN_DEBUG RB_EMPTY_ROOT:%d\n", RB_EMPTY_ROOT(&ld->sl[i].read_sort_list));
 		list_for_each_entry(__rq, &ld->sl[i].read_fifo_list, queuelist) {
 			printk("read rq in fifo:%p\n", __rq);
 			cnt++;
 		}
 	}
-	printk("there is %d rq in read fifo\n", cnt);
+	printk("KERN_DEBUGthere is %d rq in read fifo\n", cnt);
 }
-
 
 /*
  * lr_dispatch_requests selects the best request according to
@@ -401,64 +421,79 @@ static void lr_display_read_requests(struct lr_data *ld)
 static int lr_dispatch_requests(struct request_queue *q, int force)
 {
 	struct lr_data *ld = q->elevator->elevator_data;
-	struct request *rq;
+	struct request *rq = NULL;
+	struct request *reads  = ld->next_rq[READ];
+	struct request *writes  = ld->next_rq[WRITE];
+	int expire = (ld->batching > ld->batch_read || ld->batching > ld->batch_write);
+	int over = (ld->cnt > 8);
 
-	lr_display_read_requests(ld);
-	lr_display_write_requests(ld);
-	
-//	printk("KERN_DEBUG lr_dispatch_requests\n");
-
-	if (ld->next_rq[READ])
+//	lr_display_read_requests(ld);
+//	lr_display_write_requests(ld);
+	printk("KERN_DEBUG start dispatch\n");
+	printk("KERN_DEBUG reads:%p writes:%p expire:%d over:%d\n",reads, writes, expire, over);
+	if (ld->next_rq[READ]) {
 		rq = ld->next_rq[READ];
+		if (ld->batching < ld->batch_read) {
+			if(ld->cnt < 8) {
+				goto dispatch_request;
+			} else {
+				ld->pre_idx = lr_get_sl_idx(rq) + 1;
+				ld->cnt = 0;
+				goto dispatch_layer;
+			}
+		} else {
+			ld->mode = WRITE;
+			goto dispatch_writes;
+		}
+	}
+
+	/* if(ld->next_rq[READ]) */
+	/* 	rq = ld->next_rq[READ]; */
 
 	if (!rq) {
 		if (ld->mode == WRITE) {
-//			printk("KERN_DEBUG lr_dispatch_requests goto dispatch_writes from first.\n");
 			goto dispatch_writes;
+		} else {
+			goto dispatch_layer;
 		}
-//		printk("KERN_DEBUG lr_dispatch_requests goto dispatch_layer from first.\n");
-		goto dispatch_layer;
-	}
+	} 
 
 dispatch_layer:
-//	printk("KERN_DEBUG lr_dispatch_requests dispatch_layer\n");
 	rq = lr_check_sub_layer(ld);
 	if (!rq) {		// all sub layer is empty or exceed batch_read
-		ld->batching = 0;
-		ld->batch_read = 0;
-//		printk("KERN_DEBUG lr_dispatch_requests goto dispatch_writes from dispatch_layer\n");
 		goto dispatch_writes;
 	} else {
-		ld->batch_write = 0;
-		ld->batching++;
-//		printk("KERN_DEBUG lr_dispatch_requests goto dispatch_request from dispatch_layer\n");
 		goto dispatch_request;
 	}
 
-dispatch_writes:		// dipatch write request
-//	printk("KERN_DEBUG lr_dispatch_requests dispatch_writes\n");
-	ld->batch_read = 0;
+dispatch_writes:	// dipatch write request
 	if (ld->next_rq[WRITE])
 		rq = ld->next_rq[WRITE];
 
 	if (!rq && !list_empty(&ld->write_fifo_list))
 		rq = rq_entry_fifo(ld->write_fifo_list.next);
 
-	if (rq) {
-//		printk("KERN_DEBUG there is write rq\n");
-//		printk("rq  pointer is %p\n", &rq);
+	if (rq && ld->batching < ld->batch_write) {
 		goto dispatch_request;
 	}
 
-	if (!rq || ld->batching > ld->batch_write) {	// exist request && NOT Excess batch limit./* we have a next request are still entitled to batch */
+	if (!rq || ld->batching > ld->batch_write) {
 		ld->mode = READ;
 		return 0;
 	}
-	return 0;		// no request
+	return 0; // no request
 dispatch_request:
-//	printk("KERN_DEBUG lr_dispatch_requests dispatch_request\n\n");
-	if (rq)
+	if (rq) {
+		if(ld->pre_rq_dir == rq_data_dir(rq)) {
+			ld->batching++;
+		} else {
+			ld->pre_rq_dir  = rq_data_dir(rq);
+			ld->batching = 1;
+		}
 		lr_move_request(ld, rq);
+		printk("KERN_DEBUG end lr_move_request dispatched %p rq. ld->next_rq[READ]:%p, ld->next_rq[WRITE]:%p",rq, ld->next_rq[READ], ld->next_rq[WRITE]);
+	}
+	
 
 	return 1;
 }
@@ -498,17 +533,19 @@ static int lr_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	INIT_LIST_HEAD(&ld->write_fifo_list);	// for write only
 
-	for (i = 0; i < FLASH_CHIP_NUM * 2; i++) {
+	for (i = 0; i < FLASH_CHIP_NUM * 2; i++) { // for read only
 		ld->sl[i].read_sort_list = RB_ROOT;
 		INIT_LIST_HEAD(&ld->sl[i].read_fifo_list);
 	}
+	ld->batching = 0;
+	ld->mode = READ;
 	ld->fifo_expire[READ] = read_expire;
 	ld->fifo_expire[WRITE] = write_expire;
-	ld->writes_starved = writes_starved;
-	ld->fifo_batch = fifo_batch;
+	ld->batch_read = batch_read;
+	ld->batch_write = batch_write;
 	ld->cnt = 0;
 	ld->pre_idx = 0;
-
+	
 	spin_lock_irq(q->queue_lock);
 	q->elevator = eq;
 	spin_unlock_irq(q->queue_lock);
@@ -539,8 +576,9 @@ static ssize_t __FUNC(struct elevator_queue *e, char *page)		\
 }
 SHOW_FUNCTION(lr_read_expire_show, dd->fifo_expire[READ], 1);
 SHOW_FUNCTION(lr_write_expire_show, dd->fifo_expire[WRITE], 1);
-SHOW_FUNCTION(lr_writes_starved_show, dd->writes_starved, 0);
-SHOW_FUNCTION(lr_fifo_batch_show, dd->fifo_batch, 0);
+SHOW_FUNCTION(lr_batch_read_show, dd->batch_read, 1);
+SHOW_FUNCTION(lr_batch_write_show, dd->batch_write, 1);
+
 #undef SHOW_FUNCTION
 
 #define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
@@ -561,9 +599,8 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 }
 STORE_FUNCTION(lr_read_expire_store, &dd->fifo_expire[READ], 0, INT_MAX, 1);
 STORE_FUNCTION(lr_write_expire_store, &dd->fifo_expire[WRITE], 0, INT_MAX, 1);
-STORE_FUNCTION(lr_writes_starved_store, &dd->writes_starved, INT_MIN, INT_MAX,
-	       0);
-STORE_FUNCTION(lr_fifo_batch_store, &dd->fifo_batch, 0, INT_MAX, 0);
+STORE_FUNCTION(lr_batch_read_store, &dd->batch_read, 0, INT_MAX, 1);
+STORE_FUNCTION(lr_batch_write_store, &dd->batch_write, 0, INT_MAX, 1);
 #undef STORE_FUNCTION
 
 #define DD_ATTR(name) \
@@ -573,16 +610,17 @@ STORE_FUNCTION(lr_fifo_batch_store, &dd->fifo_batch, 0, INT_MAX, 0);
 static struct elv_fs_entry lr_attrs[] = {
 	DD_ATTR(read_expire),
 	DD_ATTR(write_expire),
-	DD_ATTR(writes_starved),
-	DD_ATTR(fifo_batch),
+	DD_ATTR(batch_read),
+	DD_ATTR(batch_write),
 	__ATTR_NULL
 };
 
 static struct elevator_type iosched_lr = {
 	.ops = {
-		.elevator_merge_fn = lr_merge,
-		.elevator_merged_fn = lr_merged_request,
-		.elevator_merge_req_fn = lr_merged_requests,
+//		.elevator_merge_fn = lr_merge,
+//		.elevator_merged_fn = lr_merged_request,
+//		.elevator_merge_req_fn = lr_merged_requests,
+		.elevator_allow_merge_fn = lr_allow_merge,
 		.elevator_dispatch_fn = lr_dispatch_requests,
 		.elevator_add_req_fn = lr_add_request,
 		.elevator_former_req_fn = elv_rb_former_request,
