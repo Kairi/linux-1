@@ -120,6 +120,22 @@ config IOSCHED_LR
 	---help---
 	I/O scheduler for solid state drive.
 
+config IOSCHED_ALR
+	tristate "another Layer Read I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.
+config IOSCHED_LRP
+	tristate "another Layer Read plus I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.
+config IOSCHED_PD
+	tristate "par dispatcher I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.		
+
 choice
 	prompt "Default I/O scheduler"
 	default DEFAULT_CFQ

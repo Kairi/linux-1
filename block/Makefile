@@ -28,8 +28,14 @@ obj-$(CONFIG_IOSCHED_FIFO)	+= fifo-iosched.o
 obj-$(CONFIG_IOSCHED_TPPS)	+= tpps-iosched.o
 obj-$(CONFIG_IOSCHED_GFQ)	+= gfq-iosched.o
 obj-$(CONFIG_IOSCHED_LR)	+= layer-read-iosched.o
+obj-$(CONFIG_IOSCHED_ALR)	+= another-layer-read-iosched.o
+obj-$(CONFIG_IOSCHED_LRP)	+= lrplus-iosched.o
+obj-$(CONFIG_IOSCHED_PD)	+= par-dispatcher-iosched.o
 
 
 obj-$(CONFIG_BLOCK_COMPAT)	+= compat_ioctl.o
 obj-$(CONFIG_BLK_CMDLINE_PARSER)	+= cmdline-parser.o
 obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o
+
+CFLAGS_par-dispatcher-iosched.o = -O0
+CFLAGS_lrplus-iosched.o = -O0
