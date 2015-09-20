@@ -31,6 +31,7 @@ obj-$(CONFIG_IOSCHED_LR)	+= layer-read-iosched.o
 obj-$(CONFIG_IOSCHED_ALR)	+= another-layer-read-iosched.o
 obj-$(CONFIG_IOSCHED_LRP)	+= lrplus-iosched.o
 obj-$(CONFIG_IOSCHED_PD)	+= par-dispatcher-iosched.o
+obj-$(CONFIG_IOSCHED_PD)	+= ac-iosched.o	
 
 
 obj-$(CONFIG_BLOCK_COMPAT)	+= compat_ioctl.o

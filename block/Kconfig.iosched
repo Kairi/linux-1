@@ -136,6 +136,12 @@ config IOSCHED_PD
 	---help---
 	I/O scheduler for solid state drive.		
 
+config IOSCHED_ac
+	tristate "alleviate conflict I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.		
+
 choice
 	prompt "Default I/O scheduler"
 	default DEFAULT_CFQ
