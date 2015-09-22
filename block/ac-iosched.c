@@ -43,7 +43,7 @@ enum Flag { ZERO,
 
 // cat /sys/class/block/sda/size * QEMU:51584
 static const unsigned long device_sector = ((long)1024 * 50); // QEMU
-static const int batch_read = 16;
+
 //static const unsigned long device_sector = ((long)1024 * 1024 * 128); // My Arch
 
 #define FLASH_CHIP_NUM 16
@@ -62,7 +62,7 @@ struct sub_queue {
 struct ac_matrix {
 	int rq_num[SQ_NUM];
 	int flg[SQ_NUM];
-}
+};
 
 struct ac_data {
 	struct sub_queue sq[SQ_NUM];
@@ -78,13 +78,13 @@ struct ac_data {
 	int batch_read;
 };
 
-static void ac_move_request(struct ac_data *, struct request *);
+
 static inline int ac_get_sq_idx(struct request *rq);
 
 // get expired request
 static struct request *
 ac_expired_request(struct ac_data *ad, int sync, int data_dir) {
-	struct list_head *list = &ad->fifo_list[sync][data_dir];
+	struct list_head *list = &ad->deadline_list[sync][data_dir];
 	struct request *rq;
 	if (list_empty(list))
 		return NULL;
@@ -101,7 +101,7 @@ ac_expired_request(struct ac_data *ad, int sync, int data_dir) {
 
 static inline struct rb_root *ac_rb_root(struct ac_data *ad, struct request *rq)
 {
-	const int data_dir = rq_data_diir(rq);
+	const int data_dir = rq_data_dir(rq);
 	const int sync = rq_is_sync(rq);
 	int idx = ac_get_sq_idx(rq);
 	
@@ -125,8 +125,6 @@ static void ac_add_rq_rb(struct ac_data *ad, struct request *rq)
  */
 static inline void ac_del_rq_rb(struct ac_data *ad, struct request *rq)
 {
-	const int data_dir = rq_data_dir(rq);
-	const int sync = rq_is_sync(rq);
 	struct rb_root *root;
 	int idx;
 
@@ -156,18 +154,19 @@ static inline int ac_get_sq_idx(struct request *rq)
  */
 static void ac_add_request(struct request_queue *q, struct request *rq)
 {
-	struct ac_data *ad = q->elevator->elevator_data;
-	struct ac_matrix *mat = ad->matrix[sync][data_dir];
 	const int data_dir = rq_data_dir(rq);
 	const int sync = rq_is_sync(rq);
 	const int idx = ac_get_sq_idx(rq);
-	
+	struct ac_data *ad = q->elevator->elevator_data;
+	struct ac_matrix *mat = &ad->matrix[sync][data_dir];
 
-	printk("KERN_DEBUG data_dir:%d, sync:%d", data_dir, sync);
+
+
+	printk("KERN_DEBUG data_dir:%d, sync:%d\n", data_dir, sync);
 
 
 	ac_add_rq_rb(ad, rq); // insert tree
-	list_add_tail(&rq->queuelist, deadline_list[sync][data_dir]);
+	list_add_tail(&rq->queuelist, &ad->deadline_list[sync][data_dir]);
 	rq->fifo_time = jiffies + ad->fifo_expire[sync][data_dir];
 
 	// update matrix information
@@ -190,33 +189,58 @@ static void ac_remove_request(struct request_queue *q, struct request *rq)
 }
 
 
-static struct request *
-ac_update_matrix(struct ac_data ad, struct request *rq)
+static void
+ac_update_matrix(struct ac_data *ad, struct request *rq)
 {
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 	const int idx = ac_get_sq_idx(rq);
-	struct ac_matrix *mat = ac->matrix[sync][data_dir];
+	struct ac_matrix *mat = &ad->matrix[sync][data_dir];
+	int i;
 
 	mat->rq_num[idx]--;
 	if(data_dir == READ) { // read
 		if (mat->rq_num[idx] == 0) { 
 			mat->flg[idx] = ZERO;
 		} else {
-			mat->flg[idx] = PEND;
+			mat->flg[idx] = END;
 		}
+		for (i = 0; i < SQ_NUM; i++) {
+			if (mat->flg[idx] == PEND) {
+				return;
+			}
+		}
+		
+		for (i = 0; i < SQ_NUM; i++) { // if all non zero entry is finished
+			if (mat->rq_num[idx] != 0) {
+				mat->flg[idx] = PEND;
+			}
+		}
+		
 	} else { // write
 		if (mat->rq_num[idx] == 0) {
 			mat->flg[idx] = ZERO;
 		} else {
 			mat->flg[idx] = PROC;
 		}
-	}
+
+		for (i = 0; i < SQ_NUM; i++) {
+			if (mat->flg[idx] == PEND) {
+				return;
+			}
+		}
 		
+		for (i = 0; i < SQ_NUM; i++) { // if all non zero entry is finished
+			if (mat->rq_num[idx] != 0) {
+				mat->flg[idx] = PEND;
+			}
+		}
+		
+	}
 }
 
 static struct request *
-ac_choose_expired_request(struct ac_data ad)
+ac_choose_expired_request(struct ac_data *ad)
 {
 	struct request *rq;
 	rq = ac_expired_request(ad, ASYNC, READ);
@@ -241,15 +265,97 @@ ac_choose_expired_request(struct ac_data ad)
 
 	return NULL; // no expired request
 }
-
+// zero proc end pend
+// TODO:emplement choose rq function
 static struct request *
-ac_choose_request(struct ac_data ad)
+ac_choose_request(struct ac_data *ad, int data_dir)
 {
-	struct rb_root *sync = ad->
+	struct ac_matrix *async_mat = &ad->matrix[ASYNC][data_dir];
+	struct ac_matrix *sync_mat = &ad->matrix[SYNC][data_dir];
+	struct request *rq = NULL;
+	int i;
+	if (data_dir == READ) {
+		/* ASYNC READ*/
+		for (i = 0; i < SQ_NUM; i++) {
+			if (async_mat->rq_num[i] != 0 && async_mat->flg[i] != PEND) {
+				rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[ASYNC][READ]));
+				break;
+			} 
+		}
+		if (rq == NULL) {
+			for (i = 0; i < SQ_NUM; i++) {
+				if (async_mat->flg[i] == PEND) {
+					rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[ASYNC][READ]));
+					break;
+				}
+			}
+		}
+
+		if (rq != NULL)
+			return rq;
+		/* SYNC READ*/
+		for (i = 0; i < SQ_NUM; i++) {
+			if (sync_mat->rq_num[i] != 0 && sync_mat->flg[i] != PEND) {
+				rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[SYNC][READ]));
+				break;
+			} 
+		}
+		if (rq == NULL) {
+			for (i = 0; i < SQ_NUM; i++) {
+				if (sync_mat->flg[i] == PEND) {
+					rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[SYNC][READ]));
+					break;
+				}
+			}
+		}
+
+		if (rq != NULL) 
+			return rq;
+	}
+	
+	for (i = 0; i < SQ_NUM; i++) {
+		if (async_mat->flg[i] == PROC) {
+			rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[ASYNC][WRITE]));
+			break;
+		}
+	}
+	if (rq == NULL) {
+		for (i = 0; i < SQ_NUM; i++) {
+			if(async_mat->flg[i] == PEND) {
+				rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[ASYNC][WRITE]));
+				break;
+			}
+		}
+	}
+
+	if (rq != NULL)
+		return rq;
+	
+	for (i = 0; i < SQ_NUM; i++) {
+		if (async_mat->flg[i] == PROC) {
+			rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[ASYNC][WRITE]));
+			break;
+		}
+	}
+	if (rq == NULL) {
+		for (i = 0; i < SQ_NUM; i++) {
+			if(async_mat->flg[i] == PEND) {
+				rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[ASYNC][WRITE]));
+				break;
+			}
+		}
+	}
+
+	if (rq != NULL)
+		return rq;
+
+	// not exist request
+	printk("KERN_DEBUG not exist request\n");
+	return NULL;
 }
 
 
-static int ac_dispatch_request(struct ac_data ad, struct request *rq)
+static void ac_dispatch_request(struct ac_data *ad, struct request *rq)
 {
 	rq_fifo_clear(rq);
 	
@@ -264,15 +370,24 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 	struct ac_data *ad = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
-
+	printk("KERN_DEBUG dispatch reqests\n");
+	printk("KERN_DEBUG list%d\n", list_empty(&ad->deadline_list[ASYNC][READ]));
+	printk("KERN_DEBUG list%d\n", list_empty(&ad->deadline_list[ASYNC][WRITE]));
+	printk("KERN_DEBUG list%d\n", list_empty(&ad->deadline_list[SYNC][READ]));
+	printk("KERN_DEBUG list%d\n", list_empty(&ad->deadline_list[SYNC][WRITE]));
 	rq = ac_choose_expired_request(ad);
-
+	if(rq) {
+		printk("KERN_DEBUG exist expired rq\n");
+	} else {
+		printk("KERN_DEBUG NOT exist expired rq\n");
+	}
 	if(!rq) {
-		if(sd->batching > sd->read_batc)
+		if(ad->batching > ad->batch_read)
 			data_dir = WRITE;
 
 		rq = ac_choose_request(ad, data_dir);
-		if(!rq)
+
+		if(!rq) 
 			return 0;
 		
 	}
@@ -285,16 +400,16 @@ static void ac_exit_queue(struct elevator_queue *e)
 	struct ac_data *ad = e->elevator_data;
 	int i;
 
-	BUG_ON(!list_empty(&ad->deadline__list[ASYNC][READ]));
-	BUG_ON(!list_empty(&ad->deadline__list[ASYNC][WRITE]));
-	BUG_ON(!list_empty(&ad->deadline__list[SYNC][READ]));
-	BUG_ON(!list_empty(&ad->deadline__list[SYNC][WRITE]));
+	BUG_ON(!list_empty(&ad->deadline_list[ASYNC][READ]));
+	BUG_ON(!list_empty(&ad->deadline_list[ASYNC][WRITE]));
+	BUG_ON(!list_empty(&ad->deadline_list[SYNC][READ]));
+	BUG_ON(!list_empty(&ad->deadline_list[SYNC][WRITE]));
 	
 	for (i = 0; i < SQ_NUM; i++) {
-		BUG_ON(!list_empty(&ad->sq[i].sorted_list[ASYNC][READ]));
-		BUG_ON(!list_empty(&ad->sq[i].sorted_list[ASYNC][WRITE]));
-		BUG_ON(!list_empty(&ad->sq[i].sorted_list[SYNC][READ]));
-		BUG_ON(!list_empty(&ad->sq[i].sorted_list[SYNC][WRITE]));
+		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[ASYNC][READ]));
+		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[ASYNC][WRITE]));
+		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[SYNC][READ]));
+		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[SYNC][WRITE]));
 	}
 
 	kfree(ad);
@@ -307,7 +422,7 @@ static int ac_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	struct ac_data *ad;
 	struct elevator_queue *eq;
-	int i, j;
+	int i;
 
 	eq = elevator_alloc(q, e);
 	if (!eq)
@@ -348,7 +463,7 @@ static int ac_init_queue(struct request_queue *q, struct elevator_type *e)
 	}
 
 	// init preferences
-	ad->pre_mode = ASYNC_READ;
+	ad->pre_mode = READ;
 	ad->batching = 0;
 
 	ad->fifo_expire[SYNC][READ] = sync_read_expire;
