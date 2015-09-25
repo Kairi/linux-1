@@ -57,9 +57,9 @@ static const int writes_starved = 4;
 static const unsigned long device_sector = (long)(51584); // QEMU
 //static const unsigned long device_sector = (long)(134217728); // MyArch
 
-#define AC_DEBUG
+//#define AC_DEBUG
 #define FLASH_CHIP_NUM 8
-#define SQ_NUM FLASH_CHIP_NUM * 2
+#define SQ_NUM FLASH_CHIP_NUM 
 
 struct sub_queue {
 	struct rb_root sorted_list[2][2];
@@ -68,9 +68,8 @@ struct sub_queue {
 
 // TMP
 struct ac_matrix {
-	int rq_num[SQ_NUM];
-	int flg[SQ_NUM];
-	spinlock_t my_lock;
+	atomic_t rq_num[SQ_NUM];
+	atomic_t flg[SQ_NUM];
 };
 
 struct ac_data {
@@ -93,6 +92,46 @@ struct ac_data {
 
 static inline int ac_get_sq_idx(struct request *rq);
 static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir);
+static inline void ac_del_rq_rb(struct ac_data *ad, struct request *rq);
+static inline struct rb_root *ac_rb_root(struct ac_data *ad, struct request *rq);
+static void ac_add_rq_rb(struct ac_data *ad, struct request *rq);
+
+static void
+ac_merged_requests(struct request_queue *q, struct request *req, struct request *next)
+{
+	if (!list_empty(&req->queuelist) && !list_empty(&next->queuelist)) {
+		if (time_before(next->fifo_time, req->fifo_time)){
+			list_move(&req->queuelist, &next->queuelist);
+			req->fifo_time = next->fifo_time;
+		}
+	}
+
+	/*
+	 Delete next request.
+	*/
+	rq_fifo_clear(next);
+	ac_del_rq_rb((struct ac_data *)&q->elevator->elevator_data, next);
+}
+
+static void ac_merged_request(struct request_queue *q,
+				    struct request *req, int type)
+{
+	struct ac_data *ad = q->elevator->elevator_data;
+
+	/*
+	 * if the merge was a front merge, we need to reposition request
+	 */
+	if (type == ELEVATOR_FRONT_MERGE) {
+		elv_rb_del(ac_rb_root(ad, req), req);
+		ac_add_rq_rb(ad, req);
+	}
+}
+
+static int ac_merge(struct request_queue *q, struct request **req, struct bio *bio)
+{
+	return ELEVATOR_NO_MERGE;
+}
+
 
 static struct request *ac_expired_request(struct ac_data *ad, int sync,
 					  int data_dir)
@@ -136,7 +175,12 @@ static void ac_add_rq_rb(struct ac_data *ad, struct request *rq)
  */
 static inline void ac_del_rq_rb(struct ac_data *ad, struct request *rq)
 {
-	elv_rb_del(ac_rb_root(ad, rq), rq);
+	struct rb_root *root = ac_rb_root(ad, rq);
+	if(root) {
+		printk("KERN_DEBUG ac_del_rq_rb\n");
+		printk("KERN_DEBUG root:%p, rq:%p\n", root, rq);
+		elv_rb_del(root, rq);
+	}
 }
 
 /*
@@ -147,7 +191,7 @@ static inline int ac_get_sq_idx(struct request *rq)
 	const int sector = blk_rq_pos(rq);
 	int sl_sector_num = (int)(device_sector / SQ_NUM);
 	int idx = (int)(sector / sl_sector_num);
-
+	printk("KERN_DEBUG ac_get_sq_idx idx:%d\n", idx);
 	return idx;
 }
 
@@ -176,11 +220,8 @@ static void ac_add_request(struct request_queue *q, struct request *rq)
 	ac_add_rq_rb(ad, rq);
 
 	// update matrix information
-	spin_lock(&ad->matrix[sync][data_dir].my_lock);
-	mat->rq_num[idx]++;
-	mat->flg[idx] = PEND;
-	spin_unlock(&ad->matrix[sync][data_dir].my_lock);
-
+	atomic_inc(&mat->rq_num[idx]);
+	atomic_set(&mat->flg[idx], PEND);
 }
 
 static int ac_allow_merge(struct request_queue *q, struct request *rq,
@@ -196,44 +237,42 @@ static void ac_update_matrix(struct ac_data *ad, struct request *rq)
 	const int idx = ac_get_sq_idx(rq);
 	struct ac_matrix *mat = &ad->matrix[sync][data_dir];
 	int i;
-//	spin_lock_irq(&ad->matrix[sync][data_dir].my_lock);
-	mat->rq_num[idx]--;
+
+	atomic_dec(&mat->rq_num[idx]);
 	if (data_dir == READ) {	// read
-		if (mat->rq_num[idx] == 0) {
-			mat->flg[idx] = ZERO;
+		if (atomic_read(&mat->rq_num[idx]) == 0) {
+			atomic_set(&mat->flg[idx], ZERO);
 		} else {
-			mat->flg[idx] = END;
+			atomic_set(&mat->flg[idx], END);
 		}
 		for (i = 0; i < SQ_NUM; i++) {
-			if (mat->flg[i] == PEND) {
-//				spin_unlock_irq(&ad->matrix[sync][data_dir].my_lock);
+			if (atomic_read(&mat->flg[i]) == PEND) {
 				return;
 			}
 		}
 
 		for (i = 0; i < SQ_NUM; i++) {	// if all non zero entry is finished
-			if (mat->rq_num[i] != 0) {
-				mat->flg[i] = PEND;
+			if (atomic_read(&mat->rq_num[i]) != 0) {
+				atomic_set(&mat->flg[i], PEND);
 			}
 		}
 
 	} else {		// write
-		if (mat->rq_num[idx] == 0) {
-			mat->flg[idx] = ZERO;
+		if (atomic_read(&mat->rq_num[idx]) == 0) {
+			atomic_set(&mat->flg[idx], ZERO);
 		} else {
-			mat->flg[idx] = PROC;
+			atomic_set(&mat->flg[idx], PROC);
 		}
 
 		for (i = 0; i < SQ_NUM; i++) {
-			if (mat->flg[i] == PEND) {
-//				spin_unlock_irq(&ad->matrix[sync][data_dir].my_lock);
+			if (atomic_read(&mat->flg[i]) == PEND) {
 				return;
 			}
 		}
 
 		for (i = 0; i < SQ_NUM; i++) {	// if all non zero entry is finished
-			if (mat->rq_num[i] != 0) {
-				mat->flg[i] = PEND;
+			if (atomic_read(&mat->rq_num[i]) != 0) {
+				atomic_set(&mat->flg[i],PEND);
 			}
 		}
 
@@ -285,23 +324,25 @@ static struct request *ac_choose_request(struct ac_data *ad, int data_dir)
 	int i;
 	if (data_dir == READ) {
 		/* ASYNC READ */
-		for (i = 0; i < SQ_NUM; i++) {
-			if (async_mat->rq_num[i] != 0
-			    && async_mat->flg[i] != PEND) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[ASYNC][READ]));
-				break;
-			}
-		}
-		if (rq == NULL) {
+		if(!list_empty(&ad->deadline_list[ASYNC][READ])) {
 			for (i = 0; i < SQ_NUM; i++) {
-				if (async_mat->flg[i] == PEND) {
+				if (atomic_read(&async_mat->rq_num[i]) != 0
+					&& atomic_read(&async_mat->flg[i]) != PEND ) {
 					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[ASYNC]
-							  [READ]));
+									 (&ad->sq[i].
+									  sorted_list[ASYNC][READ]));
 					break;
+				}
+			}
+			if (rq == NULL) {
+				for (i = 0; i < SQ_NUM; i++) {
+					if (atomic_read(&async_mat->flg[i]) == PEND) {
+						rq = rb_entry_rq(rb_first
+										 (&ad->sq[i].
+										  sorted_list[ASYNC]
+										  [READ]));
+						break;
+					}
 				}
 			}
 		}
@@ -310,43 +351,45 @@ static struct request *ac_choose_request(struct ac_data *ad, int data_dir)
 			return rq;
 		}
 		/* SYNC READ */
-		for (i = 0; i < SQ_NUM; i++) {
-			if (sync_mat->rq_num[i] != 0
-			    && sync_mat->flg[i] != PEND) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[SYNC][READ]));
-				break;
-			}
-		}
-		if (rq == NULL) {
+		if(!list_empty(&ad->deadline_list[SYNC][READ])) {
 			for (i = 0; i < SQ_NUM; i++) {
-				if (sync_mat->flg[i] == PEND) {
+				if (atomic_read(&sync_mat->rq_num[i]) != 0
+					&& atomic_read(&sync_mat->flg[i]) != PEND) {
 					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[SYNC]
-							  [READ]));
+									 (&ad->sq[i].
+									  sorted_list[SYNC][READ]));
 					break;
+				}
+			}
+			if (rq == NULL) {
+				for (i = 0; i < SQ_NUM; i++) {
+					if (atomic_read(&sync_mat->flg[i]) == PEND) {
+						rq = rb_entry_rq(rb_first
+										 (&ad->sq[i].
+										  sorted_list[SYNC]
+										  [READ]));
+						break;
+					}
 				}
 			}
 		}
 	} else {		// write
-		for (i = 0; i < SQ_NUM; i++) {
-			if (async_mat->flg[i] == PROC) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[ASYNC][WRITE]));
-				break;
-			}
-		}
-		if (rq == NULL) {
+		if(!list_empty(&ad->deadline_list[ASYNC][WRITE])) {
 			for (i = 0; i < SQ_NUM; i++) {
-				if (async_mat->flg[i] == PEND) {
-					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[ASYNC]
-							  [WRITE]));
+				if (atomic_read(&async_mat->flg[i]) == PROC) {
+					rq = rb_entry_rq(rb_first(&ad->sq[i]. sorted_list[ASYNC][WRITE]));
 					break;
+				}
+			}
+			if (rq == NULL) {
+				for (i = 0; i < SQ_NUM; i++) {
+					if (atomic_read(&async_mat->flg[i]) == PEND) {
+						rq = rb_entry_rq(rb_first
+										 (&ad->sq[i].
+										  sorted_list[ASYNC]
+										  [WRITE]));
+						break;
+					}
 				}
 			}
 		}
@@ -354,28 +397,26 @@ static struct request *ac_choose_request(struct ac_data *ad, int data_dir)
 		if (rq != NULL) {
 			return rq;
 		}
-
-		for (i = 0; i < SQ_NUM; i++) {
-			if (sync_mat->flg[i] == PROC) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[SYNC][WRITE]));
-				break;
-			}
-		}
-		if (rq == NULL) {
+		/* SYNC WRITE */
+		if(!list_empty(&ad->deadline_list[SYNC][WRITE])) {
 			for (i = 0; i < SQ_NUM; i++) {
-				if (sync_mat->flg[i] == PEND) {
-					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[SYNC]
-							  [WRITE]));
+				if (atomic_read(&sync_mat->flg[i]) == PROC) {
+					rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[SYNC][WRITE]));
 					break;
 				}
 			}
+			if (rq == NULL) {
+				for (i = 0; i < SQ_NUM; i++) {
+					if (atomic_read(&sync_mat->flg[i]) == PEND) {
+						rq = rb_entry_rq(rb_first(&ad->sq[i].sorted_list[SYNC][WRITE]));
+						break;
+					}
+				}
+			}
 		}
-
 	}
+			
+			
 	if (rq != NULL) {
 		return rq;
 	}
@@ -388,12 +429,10 @@ static struct request *ac_choose_request(struct ac_data *ad, int data_dir)
 
 static void ac_dispatch_request(struct ac_data *ad, struct request *rq)
 {
-	ac_update_matrix(ad, rq);
-
-
 	rq_fifo_clear(rq);
 	ac_del_rq_rb(ad, rq);
 	elv_dispatch_add_tail(rq->q, rq);
+	ac_update_matrix(ad, rq);
 
 	if (rq_data_dir(rq))
 		ad->starved = 0;
@@ -410,11 +449,11 @@ static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir)
 	}
 	printk("\n");
 	for (i = 0; i < SQ_NUM; i++) {
-		printk("%2d", ad->matrix[sync][data_dir].rq_num[i]);
+		printk("%2d", atomic_read(&ad->matrix[sync][data_dir].rq_num[i]));
 	}
 	printk("\n");
 	for (i = 0; i < SQ_NUM; i++) {
-		printk("%2d", ad->matrix[sync][data_dir].flg[i]);
+		printk("%2d", atomic_read(&ad->matrix[sync][data_dir].flg[i]));
 	}
 	printk("\n");
 }
@@ -454,8 +493,10 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 
 		rq = ac_choose_request(ad, data_dir);
 
-		if (!rq) {
-			rq = ac_choose_request(ad, !data_dir);
+		if (!rq && data_dir == WRITE) {
+			rq = ac_choose_request(ad, READ);
+		} else if (!rq && data_dir == READ) {
+			rq = ac_choose_request(ad, WRITE);
 		}
 
 		if (!rq)
@@ -497,10 +538,6 @@ static int ac_init_queue(struct request_queue *q, struct elevator_type *e)
 	INIT_LIST_HEAD(&ad->deadline_list[SYNC][READ]);
 	INIT_LIST_HEAD(&ad->deadline_list[SYNC][WRITE]);
 
-	spin_lock_init(&ad->matrix[ASYNC][READ].my_lock);
-	spin_lock_init(&ad->matrix[ASYNC][WRITE].my_lock);
-	spin_lock_init(&ad->matrix[SYNC][READ].my_lock);
-	spin_lock_init(&ad->matrix[SYNC][WRITE].my_lock);
 
 	// init sub queue list
 	for (i = 0; i < SQ_NUM; i++) {
@@ -511,14 +548,15 @@ static int ac_init_queue(struct request_queue *q, struct elevator_type *e)
 	}
 	// init data matrix
 	for (i = 0; i < SQ_NUM; i++) {
-		ad->matrix[ASYNC][READ].rq_num[i] = 0;
-		ad->matrix[ASYNC][READ].flg[i] = ZERO;
-		ad->matrix[ASYNC][WRITE].rq_num[i] = 0;
-		ad->matrix[ASYNC][WRITE].flg[i] = ZERO;
-		ad->matrix[SYNC][READ].rq_num[i] = 0;
-		ad->matrix[SYNC][READ].flg[i] = ZERO;
-		ad->matrix[SYNC][WRITE].rq_num[i] = 0;
-		ad->matrix[SYNC][WRITE].flg[i] = ZERO;
+		atomic_set(&ad->matrix[ASYNC][READ].rq_num[i], 0);
+		atomic_set(&ad->matrix[ASYNC][READ].flg[i], 0);
+		atomic_set(&ad->matrix[ASYNC][WRITE].rq_num[i], 0);
+		atomic_set(&ad->matrix[ASYNC][WRITE].flg[i], 0);
+		atomic_set(&ad->matrix[SYNC][READ].rq_num[i], 0);
+		atomic_set(&ad->matrix[SYNC][READ].flg[i], 0);
+		atomic_set(&ad->matrix[SYNC][WRITE].rq_num[i], 0);
+		atomic_set(&ad->matrix[SYNC][WRITE].flg[i], 0);
+
 
 	}
 
@@ -564,16 +602,19 @@ static void ac_exit_queue(struct elevator_queue *e)
 
 static struct elevator_type iosched_ac = {
 	.ops = {
-		.elevator_allow_merge_fn = ac_allow_merge,
+		.elevator_merge_fn = 		ac_merge,
+		.elevator_merged_fn =		ac_merged_request,
+		.elevator_merge_req_fn =	ac_merged_requests,
+//		.elevator_allow_merge_fn = ac_allow_merge, // NG
 		.elevator_dispatch_fn = ac_dispatch_requests,
 		.elevator_add_req_fn = ac_add_request,
-		.elevator_former_req_fn = elv_rb_former_request,
-		.elevator_latter_req_fn = elv_rb_latter_request,
-		.elevator_init_fn = ac_init_queue,
-		.elevator_exit_fn = ac_exit_queue,
+		.elevator_former_req_fn = elv_rb_former_request, // ok
+		.elevator_latter_req_fn = elv_rb_latter_request, // ok
+		.elevator_init_fn = ac_init_queue, // ok
+		.elevator_exit_fn = ac_exit_queue, // ok
 		},
 
-	.elevator_name = "ac",
+	.elevator_name = "acp",
 	.elevator_owner = THIS_MODULE,
 };
 
@@ -592,5 +633,5 @@ module_init(ac_init);
 module_exit(ac_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("ac(alleviate conflict) IO scheduler");
+MODULE_DESCRIPTION("ac(alleviate conflict) plus IO scheduler");
 MODULE_VERSION("0.1");

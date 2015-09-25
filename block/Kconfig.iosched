@@ -136,11 +136,21 @@ config IOSCHED_PD
 	---help---
 	I/O scheduler for solid state drive.		
 
-config IOSCHED_ac
+config IOSCHED_AC
 	tristate "alleviate conflict I/O scheduler"
 	default y
 	---help---
-	I/O scheduler for solid state drive.		
+	I/O scheduler for solid state drive.
+config IOSCHED_ACP
+	tristate "alleviate conflict I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.
+config IOSCHED_AACP
+	tristate "alleviate conflict I/O scheduler"
+	default y
+	---help---
+	I/O scheduler for solid state drive.			
 
 choice
 	prompt "Default I/O scheduler"
