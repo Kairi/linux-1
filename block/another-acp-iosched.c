@@ -1,5 +1,4 @@
 #include <linux/kernel.h>
-#include <linux/spinlock.h>
 #include <linux/fs.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
@@ -257,113 +256,51 @@ static struct request *ac_choose_expired_request(struct ac_data *ad)
 	return NULL;
 }
 
-static struct request *ac_choose_request(struct ac_data *ad, int data_dir)
+static struct request *ac_choose_request(struct ac_data *ad, int sync, int data_dir)
 {
-	struct ac_matrix *async_mat = &ad->matrix[ASYNC][data_dir];
-	struct ac_matrix *sync_mat = &ad->matrix[SYNC][data_dir];
+	struct ac_matrix *mat = &ad->matrix[sync][data_dir];
 	struct request *rq = NULL;
 	int i;
 	if (data_dir == READ) {
-		/* ASYNC READ */
-		if (!list_empty(&ad->deadline_list[ASYNC][READ])) {
+		if (!list_empty(&ad->deadline_list[sync][data_dir])) {
 			for (i = 0; i < SQ_NUM; i++) {
-				if (atomic_read(&async_mat->rq_num[i]) != 0
-				    && atomic_read(&async_mat->flg[i]) !=
-				    PEND) {
+				if (atomic_read(&mat->rq_num[i]) != 0
+				    && atomic_read(&mat->flg[i]) != PEND) {
 					rq = rq_entry_fifo(ad->sq[i].
-							   fifo_list[ASYNC]
-							   [READ].next);
+							   fifo_list[sync]
+							   [data_dir].next);
 					break;
 				}
 			}
 			if (rq == NULL) {
 				for (i = 0; i < SQ_NUM; i++) {
-					if (atomic_read(&async_mat->flg[i]) ==
-					    PEND) {
+					if (atomic_read(&mat->flg[i]) == PEND) {
 						rq = rq_entry_fifo(ad->sq[i].
 								   fifo_list
-								   [ASYNC]
-								   [READ].next);
-						break;
-					}
-				}
-			}
-		}
-
-		if (rq != NULL) {
-			return rq;
-		}
-		/* SYNC READ */
-		if (!list_empty(&ad->deadline_list[SYNC][READ])) {
-			for (i = 0; i < SQ_NUM; i++) {
-				if (atomic_read(&sync_mat->rq_num[i]) != 0
-				    && atomic_read(&sync_mat->flg[i]) != PEND) {
-					rq = rq_entry_fifo(ad->sq[i].
-							   fifo_list[SYNC]
-							   [READ].next);
-					break;
-				}
-			}
-			if (rq == NULL) {
-				for (i = 0; i < SQ_NUM; i++) {
-					if (atomic_read(&sync_mat->flg[i]) ==
-					    PEND) {
-						rq = rq_entry_fifo(ad->sq[i].
-								   fifo_list
-								   [SYNC][READ].
-								   next);
+								   [sync]
+								   [data_dir].next);
 						break;
 					}
 				}
 			}
 		}
 	} else {
-		/* ASYNC WRITE */
-		if (!list_empty(&ad->deadline_list[ASYNC][WRITE])) {
+		if (!list_empty(&ad->deadline_list[sync][data_dir])) {
 			for (i = 0; i < SQ_NUM; i++) {
-				if (atomic_read(&async_mat->flg[i]) == PROC) {
+				if (atomic_read(&mat->flg[i]) == PROC) {
 					rq = rq_entry_fifo(ad->sq[i].
-							   fifo_list[ASYNC]
-							   [WRITE].next);
+							   fifo_list[sync]
+							   [data_dir].next);
 					break;
 				}
 			}
 			if (rq == NULL) {
 				for (i = 0; i < SQ_NUM; i++) {
-					if (atomic_read(&async_mat->flg[i]) ==
-					    PEND) {
+					if (atomic_read(&mat->flg[i]) == PEND) {
 						rq = rq_entry_fifo(ad->sq[i].
 								   fifo_list
-								   [ASYNC]
-								   [WRITE].
-								   next);
-						break;
-					}
-				}
-			}
-		}
-
-		if (rq != NULL) {
-			return rq;
-		}
-		/* SYNC WRITE */
-		if (!list_empty(&ad->deadline_list[SYNC][WRITE])) {
-			for (i = 0; i < SQ_NUM; i++) {
-				if (atomic_read(&sync_mat->flg[i]) == PROC) {
-					rq = rq_entry_fifo(ad->sq[i].
-							   fifo_list[SYNC]
-							   [WRITE].next);
-					break;
-				}
-			}
-			if (rq == NULL) {
-				for (i = 0; i < SQ_NUM; i++) {
-					if (atomic_read(&sync_mat->flg[i]) ==
-					    PEND) {
-						rq = rq_entry_fifo(ad->sq[i].
-								   fifo_list
-								   [SYNC]
-								   [WRITE].
+								   [sync]
+								   [data_dir].
 								   next);
 						break;
 					}
@@ -443,13 +380,16 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 		if (ad->starved > ad->writes_starved)
 			data_dir = WRITE;
 
-		rq = ac_choose_request(ad, data_dir);
+		rq = ac_choose_request(ad, ASYNC, data_dir);
+		
+		if (!rq)
+			rq = ac_choose_request(ad, SYNC, data_dir);
 
-		if (!rq && data_dir == WRITE) {
-			rq = ac_choose_request(ad, READ);
-		} else if (!rq && data_dir == READ) {
-			rq = ac_choose_request(ad, WRITE);
-		}
+		if (!rq)
+			rq = ac_choose_request(ad, ASYNC, !data_dir);
+
+		if(!rq)
+			rq = ac_choose_request(ad, SYNC, !data_dir);
 
 		if (!rq)
 			return 0;
