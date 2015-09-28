@@ -1,19 +1,4 @@
-/*
- * AC(Alleviate Conflict I/O scheduler)
- * Policy
- * 1.AOS(Async Over Sync)
- * 2.ROW(Read Over Write)
- * 3.Each Requests have soft deadline.
- * 4.Distributed Read And Concentrated Write
- */
-
-/*
-  Idea
-  change tree to fifo
-  avoid not only start index but olso end index.
- */
 #include <linux/kernel.h>
-#include <linux/spinlock.h>
 #include <linux/fs.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
@@ -25,23 +10,17 @@
 #include <linux/rbtree.h>
 #include <linux/sched.h>
 
-/*
-  Priority
-  1.Async WRITE
-  2.Async READ
-  3.Sync WRITE
-  4.Sync READ
- */
 enum {
 	ASYNC,
 	SYNC
 };
 
+/* binary numeral */
 enum Flag {
 	ZERO,
 	END,
 	PROC,
-	PEND
+	PEND = 4
 };
 
 static const int sync_read_expire = HZ / 2;
@@ -52,39 +31,36 @@ static const int async_write_expire = 16 * HZ;
 static const int batch_read = 16;
 static const int fifo_batch = 8;
 static const int writes_starved = 4;
+/* for debug */
+/* #define AC_DEBUG */
 
-//static const unsigned long device_sector = ((long)500118192);	// ubuntu
-static const unsigned long device_sector = (long)(51584); // QEMU
-//static const unsigned long device_sector = (long)(134217728); // MyArch
-
-#define AC_DEBUG
 #define FLASH_CHIP_NUM 8
-#define SQ_NUM FLASH_CHIP_NUM * 2
+#define SQ_NUM 8
+
+#define rq_entry_timeout(ptr) list_entry((ptr), struct request, timeout_list)
+#define rq_timeout_clear(rq)	list_del_init(&(rq)->timeout_list)
 
 struct sub_queue {
-	struct rb_root sorted_list[2][2];
+	struct list_head fifo_list[2][2];
 };
 
-
-// TMP
 struct ac_matrix {
-	int rq_num[SQ_NUM];
-	int flg[SQ_NUM];
-	spinlock_t my_lock;
+	atomic_t rq_num[SQ_NUM];
+	atomic_t flg[SQ_NUM];
 };
 
 struct ac_data {
 	struct request_queue *queue;
 	struct sub_queue sq[SQ_NUM];
 
-	/* for alleviate I/O conflict */
-	struct ac_matrix matrix[2][2];
+	struct ac_matrix matrix[2];
 
-	struct list_head deadline_list[2][2];	// common queue for deadline 
+	struct list_head deadline_list[2][2];
 
 	int batched;
 	int starved;
 	int fifo_batch;
+	int pre_idx;
 
 	int fifo_expire[2][2];
 	int batch_read;
@@ -92,7 +68,61 @@ struct ac_data {
 };
 
 static inline int ac_get_sq_idx(struct request *rq);
+
 static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir);
+
+
+static void
+ac_merged_requests(struct request_queue *q, struct request *rq,
+		   struct request *next)
+{
+	struct ac_data *ad = q->elevator->elevator_data;
+	const int data_dir = rq_data_dir(rq);
+	const int next_idx = ac_get_sq_idx(next);
+	struct ac_matrix *mat = &ad->matrix[data_dir];
+
+	printk("KERN_DEBUG ac_merged_requests\n");
+	if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist)
+		&& !list_empty(&rq->timeout_list) && !list_empty(&next->timeout_list)) {
+		if (time_before(next->fifo_time, rq->fifo_time)) {
+			list_move(&rq->queuelist, &next->queuelist);
+			list_move(&rq->timeout_list, &next->timeout_list);
+			rq->fifo_time = next->fifo_time;
+		}
+	}
+
+
+	/*
+	   Delete next request.
+	 */
+
+	list_del_init(&next->queuelist);
+	list_del_init(&next->timeout_list);
+
+	/*        
+	   Update matrix info.
+	 */
+
+	atomic_dec(&mat->rq_num[next_idx]);
+	if (atomic_read(&mat->rq_num[next_idx]) == 0) {
+		atomic_set(&mat->flg[next_idx], ZERO);
+	} else {
+		atomic_set(&mat->flg[next_idx], PEND);
+	}
+}
+
+static void ac_merged_request(struct request_queue *q,
+			      struct request *req, int type)
+{
+	/* if (type == ELEVAOTR_FRONT_MERGE) { */
+	/* } */
+}
+
+static int ac_merge(struct request_queue *q, struct request **req,
+		    struct bio *bio)
+{
+	return ELEVATOR_NO_MERGE;
+}
 
 static struct request *ac_expired_request(struct ac_data *ad, int sync,
 					  int data_dir)
@@ -102,7 +132,7 @@ static struct request *ac_expired_request(struct ac_data *ad, int sync,
 	if (list_empty(list))
 		return NULL;
 
-	rq = rq_entry_fifo(list->next);
+	rq = rq_entry_timeout(list->next);
 
 	/* request has expired */
 	if (time_after(jiffies, rq->fifo_time))
@@ -111,44 +141,23 @@ static struct request *ac_expired_request(struct ac_data *ad, int sync,
 	return NULL;
 }
 
-static inline struct rb_root *ac_rb_root(struct ac_data *ad, struct request *rq)
-{
-	const int data_dir = rq_data_dir(rq);
-	const int sync = rq_is_sync(rq);
-	int idx = ac_get_sq_idx(rq);
-
-	return &ad->sq[idx].sorted_list[sync][data_dir];
-}
-
 /*
- * register ONLY READ rq to adequate tree
- */
-static void ac_add_rq_rb(struct ac_data *ad, struct request *rq)
-{
-	struct rb_root *root;
-
-	root = ac_rb_root(ad, rq);
-	elv_rb_add(root, rq);
-}
-
-/*
- * unregister read rq from tree and change next rq
- */
-static inline void ac_del_rq_rb(struct ac_data *ad, struct request *rq)
-{
-	elv_rb_del(ac_rb_root(ad, rq), rq);
-}
-
-/*
- * return rq's adequate sublayer index // TODO:regret
+ * return rq's adequate sublayer index 
  */
 static inline int ac_get_sq_idx(struct request *rq)
 {
-	const int sector = blk_rq_pos(rq);
-	int sl_sector_num = (int)(device_sector / SQ_NUM);
-	int idx = (int)(sector / sl_sector_num);
+	const int start_sector = blk_rq_pos(rq);
+	const int end_sector = rq_end_sector(rq);
+	int sl_sector_num = (int)(get_capacity(rq->rq_disk) / SQ_NUM);
+	int start_idx = (int)(start_sector / sl_sector_num);
+	int end_idx = (int)(end_sector / sl_sector_num);
 
-	return idx;
+	BUG_ON(start_idx >= SQ_NUM);
+	BUG_ON(start_idx < 0);
+	BUG_ON(end_idx >= SQ_NUM);
+	BUG_ON(end_idx < 0);
+
+	return start_idx;
 }
 
 /*
@@ -161,247 +170,190 @@ static void ac_add_request(struct request_queue *q, struct request *rq)
 	const int sync = rq_is_sync(rq);
 	const int idx = ac_get_sq_idx(rq);
 	struct ac_data *ad = q->elevator->elevator_data;
-	struct ac_matrix *mat = &ad->matrix[sync][data_dir];
+	struct ac_matrix *mat = &ad->matrix[data_dir];
 
 #ifdef AC_DEBUG
 	printk("KERN_DEBUG insert rq is data_dir:%d, sync:%d idx:%d\n",
 	       data_dir, sync, idx);
 #endif
 
-	/*
-	 * set expire time and add to fifo list and tree
-	 */
 	rq->fifo_time = jiffies + ad->fifo_expire[sync][data_dir];
-	list_add_tail(&rq->queuelist, &ad->deadline_list[sync][data_dir]); 
-	ac_add_rq_rb(ad, rq);
 
-	// update matrix information
-	spin_lock(&ad->matrix[sync][data_dir].my_lock);
-	mat->rq_num[idx]++;
-	mat->flg[idx] = PEND;
-	spin_unlock(&ad->matrix[sync][data_dir].my_lock);
+	list_add_tail(&rq->queuelist, &ad->sq[idx].fifo_list[sync][data_dir]);
+	list_add_tail(&rq->timeout_list, &ad->deadline_list[sync][data_dir]);
 
-}
-
-static int ac_allow_merge(struct request_queue *q, struct request *rq,
-			  struct bio *bio)
-{
-	return ELEVATOR_NO_MERGE;
+	/*
+	   update matrix information
+	 */
+	atomic_inc(&mat->rq_num[idx]);
+	atomic_set(&mat->flg[idx], PEND);
 }
 
 static void ac_update_matrix(struct ac_data *ad, struct request *rq)
 {
-	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 	const int idx = ac_get_sq_idx(rq);
-	struct ac_matrix *mat = &ad->matrix[sync][data_dir];
+	struct ac_matrix *mat = &ad->matrix[data_dir];
 	int i;
-//	spin_lock_irq(&ad->matrix[sync][data_dir].my_lock);
-	mat->rq_num[idx]--;
-	if (data_dir == READ) {	// read
-		if (mat->rq_num[idx] == 0) {
-			mat->flg[idx] = ZERO;
-		} else {
-			mat->flg[idx] = END;
-		}
+
+	atomic_dec(&mat->rq_num[idx]);
+	if (data_dir == READ) {	/* read */
+		if (atomic_read(&mat->rq_num[idx]) == 0) 
+			atomic_set(&mat->flg[idx], ZERO);
+		else
+			atomic_set(&mat->flg[idx], END);
+		
 		for (i = 0; i < SQ_NUM; i++) {
-			if (mat->flg[i] == PEND) {
-//				spin_unlock_irq(&ad->matrix[sync][data_dir].my_lock);
+			if (atomic_read(&mat->flg[i]) == PEND) 
 				return;
-			}
-		}
-
-		for (i = 0; i < SQ_NUM; i++) {	// if all non zero entry is finished
-			if (mat->rq_num[i] != 0) {
-				mat->flg[i] = PEND;
-			}
-		}
-
-	} else {		// write
-		if (mat->rq_num[idx] == 0) {
-			mat->flg[idx] = ZERO;
-		} else {
-			mat->flg[idx] = PROC;
 		}
 
 		for (i = 0; i < SQ_NUM; i++) {
-			if (mat->flg[i] == PEND) {
-//				spin_unlock_irq(&ad->matrix[sync][data_dir].my_lock);
-				return;
-			}
+			if (atomic_read(&mat->rq_num[i]) != 0) 
+				atomic_set(&mat->flg[i], PEND);
+		}
+	} else {		/* write */
+		if (atomic_read(&mat->rq_num[idx]) == 0) 
+			atomic_set(&mat->flg[idx], ZERO);
+		else {
+			atomic_set(&mat->flg[idx], PROC);
+			return;
 		}
 
-		for (i = 0; i < SQ_NUM; i++) {	// if all non zero entry is finished
-			if (mat->rq_num[i] != 0) {
-				mat->flg[i] = PEND;
-			}
+		for (i = 0; i < SQ_NUM; i++) {
+			if (atomic_read(&mat->flg[i]) == PEND
+			    || atomic_read(&mat->flg[i]) == PROC) 
+				return;
+		}
+
+		for (i = 0; i < SQ_NUM; i++) {
+			if (atomic_read(&mat->rq_num[i]) != 0) 
+				atomic_set(&mat->flg[i], PEND);
 		}
 
 	}
-//	spin_unlock_irq(&ad->matrix[sync][data_dir].my_lock);
-
-#ifdef AC_DEBUG
-	printk("KERN_DEBUG ac_update_matrix done.\n");
-	ac_display_matrix(ad, ASYNC, READ);
-	ac_display_matrix(ad, ASYNC, WRITE);
-	ac_display_matrix(ad, SYNC, READ);
-	ac_display_matrix(ad, SYNC, WRITE);
-#endif
 }
 
 static struct request *ac_choose_expired_request(struct ac_data *ad)
 {
 	struct request *rq;
-	rq = ac_expired_request(ad, ASYNC, READ);
-	if (rq) {
-		return rq;
-	}
-
-	rq = ac_expired_request(ad, ASYNC, WRITE);
-	if (rq) {
-		return rq;
-	}
-
 	rq = ac_expired_request(ad, SYNC, READ);
-	if (rq) {
+	if (rq) 
 		return rq;
-	}
+	
+	rq = ac_expired_request(ad, ASYNC, READ);
+	if (rq) 
+		return rq;
 
 	rq = ac_expired_request(ad, SYNC, WRITE);
-	if (rq) {
+	if (rq) 
 		return rq;
-	}
 
-	return NULL;		// no expired request
+	rq = ac_expired_request(ad, ASYNC, WRITE);
+	if (rq) 
+		return rq;
+
+	/*
+	  NO expired request.
+	*/
+	return NULL;
 }
 
-// zero proc end pend
-// TODO:emplement choose rq function
-static struct request *ac_choose_request(struct ac_data *ad, int data_dir)
+static struct request *ac_choose_request(struct ac_data *ad, int sync, int data_dir)
 {
-	struct ac_matrix *async_mat = &ad->matrix[ASYNC][data_dir];
-	struct ac_matrix *sync_mat = &ad->matrix[SYNC][data_dir];
+	struct ac_matrix *mat = &ad->matrix[data_dir];
+	struct ac_matrix *another_mat = &ad->matrix[!data_dir]; 
 	struct request *rq = NULL;
 	int i;
-	if (data_dir == READ) {
-		/* ASYNC READ */
-		for (i = 0; i < SQ_NUM; i++) {
-			if (async_mat->rq_num[i] != 0
-			    && async_mat->flg[i] != PEND) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[ASYNC][READ]));
-				break;
-			}
-		}
-		if (rq == NULL) {
-			for (i = 0; i < SQ_NUM; i++) {
-				if (async_mat->flg[i] == PEND) {
-					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[ASYNC]
-							  [READ]));
-					break;
-				}
-			}
-		}
 
-		if (rq != NULL) {
-			return rq;
-		}
-		/* SYNC READ */
-		for (i = 0; i < SQ_NUM; i++) {
-			if (sync_mat->rq_num[i] != 0
-			    && sync_mat->flg[i] != PEND) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[SYNC][READ]));
-				break;
-			}
-		}
-		if (rq == NULL) {
-			for (i = 0; i < SQ_NUM; i++) {
-				if (sync_mat->flg[i] == PEND) {
-					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[SYNC]
-							  [READ]));
-					break;
-				}
-			}
-		}
-	} else {		// write
-		for (i = 0; i < SQ_NUM; i++) {
-			if (async_mat->flg[i] == PROC) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[ASYNC][WRITE]));
-				break;
-			}
-		}
-		if (rq == NULL) {
-			for (i = 0; i < SQ_NUM; i++) {
-				if (async_mat->flg[i] == PEND) {
-					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[ASYNC]
-							  [WRITE]));
-					break;
-				}
-			}
-		}
-
-		if (rq != NULL) {
-			return rq;
-		}
-
-		for (i = 0; i < SQ_NUM; i++) {
-			if (sync_mat->flg[i] == PROC) {
-				rq = rb_entry_rq(rb_first
-						 (&ad->sq[i].
-						  sorted_list[SYNC][WRITE]));
-				break;
-			}
-		}
-		if (rq == NULL) {
-			for (i = 0; i < SQ_NUM; i++) {
-				if (sync_mat->flg[i] == PEND) {
-					rq = rb_entry_rq(rb_first
-							 (&ad->sq[i].
-							  sorted_list[SYNC]
-							  [WRITE]));
-					break;
-				}
-			}
-		}
-
-	}
-	if (rq != NULL) {
+	if (list_empty(&ad->deadline_list[sync][data_dir]))
 		return rq;
+
+
+	for (i = ad->pre_idx; i < SQ_NUM; i++) {
+		if (data_dir == READ) {
+			if ((atomic_read(&mat->rq_num[i]) != 0) &&
+				(atomic_read(&mat->flg[i]) == PEND) &&
+				(atomic_read(&another_mat->flg[i]) != PROC)) { /* alleviate cross penalty */
+				if (!list_empty(&ad->sq[i].fifo_list[sync][data_dir])) {
+					return rq_entry_fifo(ad->sq[i].fifo_list[sync][data_dir].next);
+				}
+			}
+		}
+		
+		if (data_dir == WRITE) {
+			if (atomic_read(&mat->flg[i]) == PROC)
+				if (!list_empty(&ad->sq[i].fifo_list[sync][data_dir])) {
+					return rq_entry_fifo(ad->sq[i].fifo_list[sync][data_dir].next);
+				}
+		}
+	}
+	
+	for (i = 0; i < ad->pre_idx; i++) {
+		if (data_dir == READ) {
+			if((atomic_read(&mat->rq_num[i]) != 0) &&
+			   (atomic_read(&mat->flg[i]) == PEND) &&
+			   (atomic_read(&another_mat->flg[i]) != PROC)) { /* alleviate cross penalty */
+				if (!list_empty(&ad->sq[i].fifo_list[sync][data_dir])) {
+					return rq_entry_fifo(ad->sq[i].fifo_list[sync][data_dir].next);
+				}
+			}
+		}
+
+		if (data_dir == WRITE) {
+			if (atomic_read(&mat->flg[i]) == PROC) {
+				if (!list_empty(&ad->sq[i].fifo_list[sync][data_dir])) {
+					return rq_entry_fifo(ad->sq[i].fifo_list[sync][data_dir].next);
+				}
+			}
+		}
 	}
 
-#ifdef AC_DEBUG
-	printk("KERN_DEBUG not exist data_dir:%d  request\n", data_dir);
-#endif
-	return NULL;
+	// TODO:regret
+	if (data_dir == READ) { // other sq is empty PEND PROC pair
+		printk("KERN_DEBUG collision req reluctantly\n");
+		ac_display_matrix(ad, SYNC, READ);
+	
+		for (i = 0; i < SQ_NUM; i++) {
+			if((atomic_read(&mat->flg[i]) == PEND) &&
+			   (atomic_read(&another_mat->flg[i]) == PROC)) {
+				if (!list_empty(&ad->sq[i].fifo_list[sync][data_dir])) {
+					return rq_entry_fifo(ad->sq[i].fifo_list[sync][data_dir].next);
+				}
+			}
+		}
+	}
+
+
+	for (i = 0; i < SQ_NUM; i++) {
+		if (atomic_read(&mat->flg[i]) == PEND)  {
+			if (!list_empty(&ad->sq[i].fifo_list[sync][data_dir])) {
+				return rq_entry_fifo(ad->sq[i].fifo_list[sync][data_dir].next);
+			}
+		}
+	}
+
+	return rq;
 }
 
 static void ac_dispatch_request(struct ac_data *ad, struct request *rq)
 {
+
+	ad->pre_idx = ac_get_sq_idx(rq);
+
 	ac_update_matrix(ad, rq);
-
-
-	rq_fifo_clear(rq);
-	ac_del_rq_rb(ad, rq);
-	elv_dispatch_add_tail(rq->q, rq);
 
 	if (rq_data_dir(rq))
 		ad->starved = 0;
 	else
 		ad->starved++;
+
+	list_del_init(&rq->queuelist);
+	list_del_init(&rq->timeout_list);
+	elv_dispatch_add_tail(rq->q, rq);
 }
 
-#ifdef AC_DEBUG
+
 static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir)
 {
 	int i;
@@ -410,15 +362,16 @@ static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir)
 	}
 	printk("\n");
 	for (i = 0; i < SQ_NUM; i++) {
-		printk("%2d", ad->matrix[sync][data_dir].rq_num[i]);
+		printk("%2d",
+		       atomic_read(&ad->matrix[data_dir].rq_num[i]));
 	}
 	printk("\n");
 	for (i = 0; i < SQ_NUM; i++) {
-		printk("%2d", ad->matrix[sync][data_dir].flg[i]);
+		printk("%2d", atomic_read(&ad->matrix[data_dir].flg[i]));
 	}
 	printk("\n");
 }
-#endif
+
 
 static int ac_dispatch_requests(struct request_queue *q, int force)
 {
@@ -427,44 +380,54 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 	int data_dir = READ;
 
 #ifdef AC_DEBUG
-	printk("KERN_DEBUG dispatch reqests\n");
+	printk("---KERN_DEBUG ac_dispatch_reqests()---\n");
 	printk("KERN_DEBUG async read list%d\n",
 	       list_empty(&ad->deadline_list[ASYNC][READ]));
+	ac_display_matrix(ad, ASYNC, READ);
 	printk("KERN_DEBUG async write list%d\n",
 	       list_empty(&ad->deadline_list[ASYNC][WRITE]));
+	ac_display_matrix(ad, ASYNC, WRITE);
 	printk("KERN_DEBUG sync read list%d\n",
 	       list_empty(&ad->deadline_list[SYNC][READ]));
+	ac_display_matrix(ad, SYNC, READ);
 	printk("KERN_DEBUG sync write list%d\n",
 	       list_empty(&ad->deadline_list[SYNC][WRITE]));
-	ac_display_matrix(ad, 0, 0);
-	ac_display_matrix(ad, 0, 1);
-	ac_display_matrix(ad, 1, 0);
-	ac_display_matrix(ad, 1, 1);
+	ac_display_matrix(ad, SYNC, WRITE);
 #endif
+
 
 	if (ad->batched > ad->fifo_batch) {
 		ad->batched = 0;
 		rq = ac_choose_expired_request(ad);
+		#ifdef AC_DEBUG
+		printk("KERN_DEBUG exist expired request. idx:%d\n", ac_get_sq_idx(rq));
+		#endif
 	}
 
 	if (!rq) {
 		if (ad->starved > ad->writes_starved)
 			data_dir = WRITE;
+
+		rq = ac_choose_request(ad, SYNC, data_dir);
 		
+		if (!rq)
+			rq = ac_choose_request(ad, ASYNC, data_dir);
 
-		rq = ac_choose_request(ad, data_dir);
+		if (!rq)
+			rq = ac_choose_request(ad, SYNC, !data_dir);
 
-		if (!rq) {
-			rq = ac_choose_request(ad, !data_dir);
-		}
+		if(!rq)
+			rq = ac_choose_request(ad, ASYNC, !data_dir);
 
 		if (!rq)
 			return 0;
 	}
+
+	
 #ifdef AC_DEBUG
-	printk("KERN_DEBUG dispatch reqests\n");
-	printk("KERN_DEBUG dispatch rq:%p\n", rq);
+	printk("KERN_DEBUG dispatch rq:%p idx:%d data_dir:%d\n", rq, ac_get_sq_idx(rq), rq_data_dir(rq));
 #endif
+
 	ac_dispatch_request(ad, rq);
 	return 1;
 }
@@ -490,40 +453,26 @@ static int ac_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	eq->elevator_data = ad;
 	ad->queue = q;
-	// init deadline queues
 
 	INIT_LIST_HEAD(&ad->deadline_list[ASYNC][READ]);
 	INIT_LIST_HEAD(&ad->deadline_list[ASYNC][WRITE]);
 	INIT_LIST_HEAD(&ad->deadline_list[SYNC][READ]);
 	INIT_LIST_HEAD(&ad->deadline_list[SYNC][WRITE]);
 
-	spin_lock_init(&ad->matrix[ASYNC][READ].my_lock);
-	spin_lock_init(&ad->matrix[ASYNC][WRITE].my_lock);
-	spin_lock_init(&ad->matrix[SYNC][READ].my_lock);
-	spin_lock_init(&ad->matrix[SYNC][WRITE].my_lock);
-
-	// init sub queue list
 	for (i = 0; i < SQ_NUM; i++) {
-		ad->sq[i].sorted_list[ASYNC][READ] = RB_ROOT;
-		ad->sq[i].sorted_list[ASYNC][WRITE] = RB_ROOT;
-		ad->sq[i].sorted_list[SYNC][READ] = RB_ROOT;
-		ad->sq[i].sorted_list[SYNC][WRITE] = RB_ROOT;
-	}
-	// init data matrix
-	for (i = 0; i < SQ_NUM; i++) {
-		ad->matrix[ASYNC][READ].rq_num[i] = 0;
-		ad->matrix[ASYNC][READ].flg[i] = ZERO;
-		ad->matrix[ASYNC][WRITE].rq_num[i] = 0;
-		ad->matrix[ASYNC][WRITE].flg[i] = ZERO;
-		ad->matrix[SYNC][READ].rq_num[i] = 0;
-		ad->matrix[SYNC][READ].flg[i] = ZERO;
-		ad->matrix[SYNC][WRITE].rq_num[i] = 0;
-		ad->matrix[SYNC][WRITE].flg[i] = ZERO;
-
+		INIT_LIST_HEAD(&ad->sq[i].fifo_list[ASYNC][READ]);
+		INIT_LIST_HEAD(&ad->sq[i].fifo_list[SYNC][READ]);
+		INIT_LIST_HEAD(&ad->sq[i].fifo_list[ASYNC][WRITE]);
+		INIT_LIST_HEAD(&ad->sq[i].fifo_list[SYNC][WRITE]);
 	}
 
-	// init preferences
-//	ad->pre_mode = READ;
+	for (i = 0; i < SQ_NUM; i++) {
+		atomic_set(&ad->matrix[READ].rq_num[i], 0);
+		atomic_set(&ad->matrix[READ].flg[i], 0);
+		atomic_set(&ad->matrix[WRITE].rq_num[i], 0);
+		atomic_set(&ad->matrix[WRITE].flg[i], 0);
+	}
+
 	ad->batched = 0;
 	ad->starved = 0;
 	ad->fifo_batch = fifo_batch;
@@ -547,32 +496,108 @@ static void ac_exit_queue(struct elevator_queue *e)
 	struct ac_data *ad = e->elevator_data;
 	int i;
 
+	for (i = 0; i < SQ_NUM; i++) {
+		BUG_ON(!list_empty(&ad->sq[i].fifo_list[ASYNC][READ]));
+		BUG_ON(!list_empty(&ad->sq[i].fifo_list[ASYNC][WRITE]));
+		BUG_ON(!list_empty(&ad->sq[i].fifo_list[SYNC][READ]));
+		BUG_ON(!list_empty(&ad->sq[i].fifo_list[SYNC][WRITE]));
+	}
+
 	BUG_ON(!list_empty(&ad->deadline_list[ASYNC][READ]));
 	BUG_ON(!list_empty(&ad->deadline_list[ASYNC][WRITE]));
 	BUG_ON(!list_empty(&ad->deadline_list[SYNC][READ]));
 	BUG_ON(!list_empty(&ad->deadline_list[SYNC][WRITE]));
 
-	for (i = 0; i < SQ_NUM; i++) {
-		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[ASYNC][READ]));
-		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[ASYNC][WRITE]));
-		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[SYNC][READ]));
-		BUG_ON(!RB_EMPTY_ROOT(&ad->sq[i].sorted_list[SYNC][WRITE]));
-	}
-
 	kfree(ad);
 }
 
+
+/*
+  sysfs
+ */
+static ssize_t
+ac_var_show(int var, char *page)
+{
+	return sprintf(page, "%d\n", var);
+}
+
+static ssize_t
+ac_var_store(int *var, const char *page, size_t count)
+{
+	char *p = (char *) page;
+
+	*var = simple_strtol(p, &p, 10);
+	return count;
+}
+
+#define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
+static ssize_t __FUNC(struct elevator_queue *e, char *page)		\
+{									\
+	struct ac_data *ad = e->elevator_data;			\
+	int __data = __VAR;						\
+	if (__CONV)							\
+		__data = jiffies_to_msecs(__data);			\
+	return ac_var_show(__data, (page));			\
+}
+SHOW_FUNCTION(ac_sync_read_expire_show, ad->fifo_expire[SYNC][READ], 1);
+SHOW_FUNCTION(ac_sync_write_expire_show, ad->fifo_expire[SYNC][WRITE], 1);
+SHOW_FUNCTION(ac_async_read_expire_show, ad->fifo_expire[ASYNC][READ], 1);
+SHOW_FUNCTION(ac_async_write_expire_show, ad->fifo_expire[ASYNC][WRITE], 1);
+SHOW_FUNCTION(ac_fifo_batch_show, ad->fifo_batch, 0);
+SHOW_FUNCTION(ac_writes_starved_show, ad->writes_starved, 0);
+#undef SHOW_FUNCTION
+
+#define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
+static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	\
+{									\
+	struct ac_data *ad = e->elevator_data;			\
+	int __data;							\
+	int ret = ac_var_store(&__data, (page), count);		\
+	if (__data < (MIN))						\
+		__data = (MIN);						\
+	else if (__data > (MAX))					\
+		__data = (MAX);						\
+	if (__CONV)							\
+		*(__PTR) = msecs_to_jiffies(__data);			\
+	else								\
+		*(__PTR) = __data;					\
+	return ret;							\
+}
+STORE_FUNCTION(ac_sync_read_expire_store, &ad->fifo_expire[SYNC][READ], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_sync_write_expire_store, &ad->fifo_expire[SYNC][WRITE], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_async_read_expire_store, &ad->fifo_expire[ASYNC][READ], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_async_write_expire_store, &ad->fifo_expire[ASYNC][WRITE], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_fifo_batch_store, &ad->fifo_batch, 0, INT_MAX, 0);
+STORE_FUNCTION(ac_writes_starved_store, &ad->writes_starved, 0, INT_MAX, 0);
+#undef STORE_FUNCTION
+// S_IRUGIOS|S_IWUSR means sysfs be enable to writed and readed when running
+#define DD_ATTR(name) \
+	__ATTR(name, S_IRUGO|S_IWUSR, ac_##name##_show, \
+				      ac_##name##_store)
+
+static struct elv_fs_entry ac_attrs[] = {
+	DD_ATTR(sync_read_expire),
+	DD_ATTR(sync_write_expire),
+	DD_ATTR(async_read_expire),
+	DD_ATTR(async_write_expire),
+	DD_ATTR(fifo_batch),
+	DD_ATTR(writes_starved),
+	__ATTR_NULL
+};
+
+
 static struct elevator_type iosched_ac = {
 	.ops = {
-		.elevator_allow_merge_fn = ac_allow_merge,
+		.elevator_merge_fn = ac_merge,
+//		.elevator_merged_fn = ac_merged_request,
+		.elevator_merge_req_fn = ac_merged_requests,
 		.elevator_dispatch_fn = ac_dispatch_requests,
 		.elevator_add_req_fn = ac_add_request,
-		.elevator_former_req_fn = elv_rb_former_request,
-		.elevator_latter_req_fn = elv_rb_latter_request,
 		.elevator_init_fn = ac_init_queue,
 		.elevator_exit_fn = ac_exit_queue,
 		},
 
+	.elevator_attrs = ac_attrs,
 	.elevator_name = "ac",
 	.elevator_owner = THIS_MODULE,
 };
@@ -592,5 +617,5 @@ module_init(ac_init);
 module_exit(ac_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("ac(alleviate conflict) IO scheduler");
+MODULE_DESCRIPTION("AC(Alleviate Conflict) IO scheduler");
 MODULE_VERSION("0.1");
