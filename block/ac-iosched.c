@@ -1,3 +1,8 @@
+/*
+ * Alleviate Conflict i/o scheduler.
+ *
+ * Copyright (C) 2015 Kairi <kairi199088@gmail.com>
+ */
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/blkdev.h>
@@ -15,28 +20,27 @@ enum {
 	SYNC
 };
 
-/* binary numeral */
+
 enum Flag {
 	ZERO,
 	END,
 	PROC,
-	PEND = 4
+	PEND
 };
 
-static const int sync_read_expire = HZ / 2;
-static const int sync_write_expire = 2 * HZ;
-static const int async_read_expire = 4 * HZ;
-static const int async_write_expire = 16 * HZ;
+static const int sync_read_expire = HZ / 2; /* max time before a syn read is submitted. */
+static const int sync_write_expire = 2 * HZ; /* ditto for sync writes, thesee limits are SOFT! */
+static const int async_read_expire = 4 * HZ; /* ditto for async read, thesee limits are SOFT! */
+static const int async_write_expire = 16 * HZ; /* ditto for async writes, thesee limits are SOFT! */
+static const int writes_starved = 4; /* max times reads can starve a write */
+static const int fifo_batch = 8; /* # of sequential requests treated as one by the above parameters. For throghputs. */
 
-static const int batch_read = 16;
-static const int fifo_batch = 8;
-static const int writes_starved = 4;
-/* for debug */
+
+/* for debugging parameter.*/
 /* #define AC_DEBUG */
 
 #define FLASH_CHIP_NUM 8
 #define SQ_NUM 8
-
 #define rq_entry_timeout(ptr) list_entry((ptr), struct request, timeout_list)
 #define rq_timeout_clear(rq)	list_del_init(&(rq)->timeout_list)
 
@@ -44,11 +48,16 @@ struct sub_queue {
 	struct list_head fifo_list[2][2];
 };
 
+/*
+ * for dispatch sort information 
+ * See Documentation/atomic_ops.txt
+ */
 struct ac_matrix {
 	atomic_t rq_num[SQ_NUM];
 	atomic_t flg[SQ_NUM];
 };
 
+/* runtime data */
 struct ac_data {
 	struct request_queue *queue;
 	struct sub_queue sq[SQ_NUM];
@@ -63,25 +72,22 @@ struct ac_data {
 	int pre_idx;
 
 	int fifo_expire[2][2];
-	int batch_read;
 	int writes_starved;
 };
 
 static inline int ac_get_sq_idx(struct request *rq);
-
 static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir);
 
-
+/*
+  reg to .elevator_merge_req_fn
+*/
 static void
 ac_merged_requests(struct request_queue *q, struct request *rq,
 		   struct request *next)
 {
 	struct ac_data *ad = q->elevator->elevator_data;
 	const int data_dir = rq_data_dir(rq);
-	const int next_idx = ac_get_sq_idx(next);
-	struct ac_matrix *mat = &ad->matrix[data_dir];
 
-	printk("KERN_DEBUG ac_merged_requests\n");
 	if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist)
 		&& !list_empty(&rq->timeout_list) && !list_empty(&next->timeout_list)) {
 		if (time_before(next->fifo_time, rq->fifo_time)) {
@@ -91,33 +97,44 @@ ac_merged_requests(struct request_queue *q, struct request *rq,
 		}
 	}
 
-
 	/*
 	   Delete next request.
 	 */
 
-	list_del_init(&next->queuelist);
-	list_del_init(&next->timeout_list);
-
-	/*        
-	   Update matrix info.
-	 */
-
-	atomic_dec(&mat->rq_num[next_idx]);
-	if (atomic_read(&mat->rq_num[next_idx]) == 0) {
-		atomic_set(&mat->flg[next_idx], ZERO);
-	} else {
-		atomic_set(&mat->flg[next_idx], PEND);
-	}
+	rq_fifo_clear(next);
+	rq_timeout_clear(next);
 }
 
+/*
+  reg to .elevator_merged_fn
+*/
 static void ac_merged_request(struct request_queue *q,
-			      struct request *req, int type)
+			      struct request *rq, int type)
 {
-	/* if (type == ELEVAOTR_FRONT_MERGE) { */
-	/* } */
+	/* struct ac_data *ad = q->elevator->elevator_data; */
+	/* const int data_dir = rq_data_dir(rq); */
+	/* const int next_idx = ac_get_sq_idx(next); */
+	/* struct ac_matrix *mat = &ad->matrix[data_dir]; */
+	return;
+	/*
+	 * if the merge was a front merge, we need to update matrix.
+	 */
+	 /* if (type == ELEVAOTR_FRONT_MERGE) { */
+	 /* 	 /\*         */
+	 /* 	   Update matrix info. */
+	 /* 	 *\/ */
+	 /* 	 atomic_dec(&mat->rq_num[next_idx]); */
+	 /* 	 if (atomic_read(&mat->rq_num[next_idx]) == 0) { */
+	 /* 		 atomic_set(&mat->flg[next_idx], ZERO); */
+	 /* 	 } else { */
+	 /* 		 atomic_set(&mat->flg[next_idx], PEND); */
+	 /* 	 } */
+	 /* }  */
 }
 
+/*
+  reg to .elevator_merge_fn
+*/
 static int ac_merge(struct request_queue *q, struct request **req,
 		    struct bio *bio)
 {
@@ -161,7 +178,6 @@ static inline int ac_get_sq_idx(struct request *rq)
 }
 
 /*
- * add rq to rbtree and fifo
  * registerd to elevator_add_req_fn
  */
 static void ac_add_request(struct request_queue *q, struct request *rq)
@@ -171,6 +187,10 @@ static void ac_add_request(struct request_queue *q, struct request *rq)
 	const int idx = ac_get_sq_idx(rq);
 	struct ac_data *ad = q->elevator->elevator_data;
 	struct ac_matrix *mat = &ad->matrix[data_dir];
+	/*
+	 * Add request to the proper fifo list and set its
+	 * expire time.
+	 */
 
 #ifdef AC_DEBUG
 	printk("KERN_DEBUG insert rq is data_dir:%d, sync:%d idx:%d\n",
@@ -183,12 +203,15 @@ static void ac_add_request(struct request_queue *q, struct request *rq)
 	list_add_tail(&rq->timeout_list, &ad->deadline_list[sync][data_dir]);
 
 	/*
-	   update matrix information
+	 * update matrix information
 	 */
 	atomic_inc(&mat->rq_num[idx]);
 	atomic_set(&mat->flg[idx], PEND);
 }
 
+/*
+ * update matrix information.
+ */
 static void ac_update_matrix(struct ac_data *ad, struct request *rq)
 {
 	const int data_dir = rq_data_dir(rq);
@@ -237,6 +260,11 @@ static void ac_update_matrix(struct ac_data *ad, struct request *rq)
 static struct request *ac_choose_expired_request(struct ac_data *ad)
 {
 	struct request *rq;
+	/*
+	 * Check expired requests.
+	 * Read requests have priority over write.
+	 * Synchronous requests have priority over asynchronous.
+	 */
 	rq = ac_expired_request(ad, SYNC, READ);
 	if (rq) 
 		return rq;
@@ -265,6 +293,12 @@ static struct request *ac_choose_request(struct ac_data *ad, int sync, int data_
 	struct ac_matrix *another_mat = &ad->matrix[!data_dir]; 
 	struct request *rq = NULL;
 	int i;
+
+	/*
+	 * Retrieve request from available fifo list.
+	 * Read requests have priority over write.
+	 * Synchronous requests have priority over asynchronous.
+	 */
 
 	if (list_empty(&ad->deadline_list[sync][data_dir]))
 		return rq;
@@ -309,9 +343,9 @@ static struct request *ac_choose_request(struct ac_data *ad, int sync, int data_
 		}
 	}
 
-	// TODO:regret
 	if (data_dir == READ) { // other sq is empty PEND PROC pair
 		printk("KERN_DEBUG collision req reluctantly\n");
+		/* collision req reluctantly */
 		ac_display_matrix(ad, SYNC, READ);
 	
 		for (i = 0; i < SQ_NUM; i++) {
@@ -338,7 +372,10 @@ static struct request *ac_choose_request(struct ac_data *ad, int sync, int data_
 
 static void ac_dispatch_request(struct ac_data *ad, struct request *rq)
 {
-
+	/*
+	 * Remove the request from the fifo list
+	 * and dispatch it.
+	 */
 	ad->pre_idx = ac_get_sq_idx(rq);
 
 	ac_update_matrix(ad, rq);
@@ -348,12 +385,13 @@ static void ac_dispatch_request(struct ac_data *ad, struct request *rq)
 	else
 		ad->starved++;
 
-	list_del_init(&rq->queuelist);
-	list_del_init(&rq->timeout_list);
+
+	rq_fifo_clear(rq);
+	rq_timeout_clear(rq);
 	elv_dispatch_add_tail(rq->q, rq);
 }
 
-
+/* for debugging function */
 static void ac_display_matrix(struct ac_data *ad, int sync, int data_dir)
 {
 	int i;
@@ -395,7 +433,9 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 	ac_display_matrix(ad, SYNC, WRITE);
 #endif
 
-
+	/*
+	 * Retrieve any expired request after a batch of sequential requests.
+	 */
 	if (ad->batched > ad->fifo_batch) {
 		ad->batched = 0;
 		rq = ac_choose_expired_request(ad);
@@ -404,6 +444,7 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 		#endif
 	}
 
+	/* Retrieve request */
 	if (!rq) {
 		if (ad->starved > ad->writes_starved)
 			data_dir = WRITE;
@@ -428,6 +469,7 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 	printk("KERN_DEBUG dispatch rq:%p idx:%d data_dir:%d\n", rq, ac_get_sq_idx(rq), rq_data_dir(rq));
 #endif
 
+	/* Dispatch request */
 	ac_dispatch_request(ad, rq);
 	return 1;
 }
@@ -483,8 +525,6 @@ static int ac_init_queue(struct request_queue *q, struct elevator_type *e)
 	ad->fifo_expire[ASYNC][READ] = async_read_expire;
 	ad->fifo_expire[ASYNC][WRITE] = async_write_expire;
 
-	ad->batch_read = batch_read;
-
 	spin_lock_irq(q->queue_lock);
 	q->elevator = eq;
 	spin_unlock_irq(q->queue_lock);
@@ -507,13 +547,13 @@ static void ac_exit_queue(struct elevator_queue *e)
 	BUG_ON(!list_empty(&ad->deadline_list[ASYNC][WRITE]));
 	BUG_ON(!list_empty(&ad->deadline_list[SYNC][READ]));
 	BUG_ON(!list_empty(&ad->deadline_list[SYNC][WRITE]));
-
+	/* Free structure */
 	kfree(ad);
 }
 
 
 /*
-  sysfs
+  For sysfs code.
  */
 static ssize_t
 ac_var_show(int var, char *page)
@@ -617,5 +657,6 @@ module_init(ac_init);
 module_exit(ac_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Kairi");
 MODULE_DESCRIPTION("AC(Alleviate Conflict) IO scheduler");
-MODULE_VERSION("0.1");
+MODULE_VERSION("0.2");
