@@ -32,7 +32,7 @@ static const int fifo_batch = 8;
 static const int writes_starved = 4;
 
 /* for debug */
-/* #define AC_DEBUG */
+#define AC_DEBUG
 
 #define FLASH_CHIP_NUM 8
 #define SQ_NUM 8
@@ -152,7 +152,7 @@ static inline int ac_get_sq_idx(struct request *rq)
 	BUG_ON(end_idx >= SQ_NUM);
 	BUG_ON(end_idx < 0);
 
-	return idx;
+	return start_idx;
 }
 
 /*
@@ -236,12 +236,12 @@ static struct request *ac_choose_expired_request(struct ac_data *ad)
 	rq = ac_expired_request(ad, SYNC, READ);
 	if (rq) 
 		return rq;
-
-	rq = ac_expired_request(ad, SYNC, WRITE);
+	
+	rq = ac_expired_request(ad, ASYNC, READ);
 	if (rq) 
 		return rq;
 
-	rq = ac_expired_request(ad, ASYNC, READ);
+	rq = ac_expired_request(ad, SYNC, WRITE);
 	if (rq) 
 		return rq;
 
@@ -356,16 +356,16 @@ static int ac_dispatch_requests(struct request_queue *q, int force)
 		if (ad->starved > ad->writes_starved)
 			data_dir = WRITE;
 
-		rq = ac_choose_request(ad, ASYNC, data_dir);
+		rq = ac_choose_request(ad, SYNC, data_dir);
 		
 		if (!rq)
-			rq = ac_choose_request(ad, SYNC, data_dir);
+			rq = ac_choose_request(ad, ASYNC, data_dir);
 
 		if (!rq)
-			rq = ac_choose_request(ad, ASYNC, !data_dir);
+			rq = ac_choose_request(ad, SYNC, !data_dir);
 
 		if(!rq)
-			rq = ac_choose_request(ad, SYNC, !data_dir);
+			rq = ac_choose_request(ad, ASYNC, !data_dir);
 
 		if (!rq)
 			return 0;
@@ -461,6 +461,81 @@ static void ac_exit_queue(struct elevator_queue *e)
 	kfree(ad);
 }
 
+
+/*
+  sysfs
+ */
+static ssize_t
+ac_var_show(int var, char *page)
+{
+	return sprintf(page, "%d\n", var);
+}
+
+static ssize_t
+ac_var_store(int *var, const char *page, size_t count)
+{
+	char *p = (char *) page;
+
+	*var = simple_strtol(p, &p, 10);
+	return count;
+}
+
+#define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
+static ssize_t __FUNC(struct elevator_queue *e, char *page)		\
+{									\
+	struct ac_data *ad = e->elevator_data;			\
+	int __data = __VAR;						\
+	if (__CONV)							\
+		__data = jiffies_to_msecs(__data);			\
+	return ac_var_show(__data, (page));			\
+}
+SHOW_FUNCTION(ac_sync_read_expire_show, ad->fifo_expire[SYNC][READ], 1);
+SHOW_FUNCTION(ac_sync_write_expire_show, ad->fifo_expire[SYNC][WRITE], 1);
+SHOW_FUNCTION(ac_async_read_expire_show, ad->fifo_expire[ASYNC][READ], 1);
+SHOW_FUNCTION(ac_async_write_expire_show, ad->fifo_expire[ASYNC][WRITE], 1);
+SHOW_FUNCTION(ac_fifo_batch_show, ad->fifo_batch, 0);
+SHOW_FUNCTION(ac_writes_starved_show, ad->writes_starved, 0);
+#undef SHOW_FUNCTION
+
+#define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
+static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	\
+{									\
+	struct ac_data *ad = e->elevator_data;			\
+	int __data;							\
+	int ret = ac_var_store(&__data, (page), count);		\
+	if (__data < (MIN))						\
+		__data = (MIN);						\
+	else if (__data > (MAX))					\
+		__data = (MAX);						\
+	if (__CONV)							\
+		*(__PTR) = msecs_to_jiffies(__data);			\
+	else								\
+		*(__PTR) = __data;					\
+	return ret;							\
+}
+STORE_FUNCTION(ac_sync_read_expire_store, &ad->fifo_expire[SYNC][READ], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_sync_write_expire_store, &ad->fifo_expire[SYNC][WRITE], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_async_read_expire_store, &ad->fifo_expire[ASYNC][READ], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_async_write_expire_store, &ad->fifo_expire[ASYNC][WRITE], 0, INT_MAX, 1);
+STORE_FUNCTION(ac_fifo_batch_store, &ad->fifo_batch, 0, INT_MAX, 0);
+STORE_FUNCTION(ac_writes_starved_store, &ad->writes_starved, 0, INT_MAX, 0);
+#undef STORE_FUNCTION
+// S_IRUGIOS|S_IWUSR means sysfs be enable to writed and readed when running
+#define DD_ATTR(name) \
+	__ATTR(name, S_IRUGO|S_IWUSR, ac_##name##_show, \
+				      ac_##name##_store)
+
+static struct elv_fs_entry ac_attrs[] = {
+	DD_ATTR(sync_read_expire),
+	DD_ATTR(sync_write_expire),
+	DD_ATTR(async_read_expire),
+	DD_ATTR(async_write_expire),
+	DD_ATTR(fifo_batch),
+	DD_ATTR(writes_starved),
+	__ATTR_NULL
+};
+
+
 static struct elevator_type iosched_ac = {
 	.ops = {
 		.elevator_merge_fn = ac_merge,
@@ -472,6 +547,7 @@ static struct elevator_type iosched_ac = {
 		.elevator_exit_fn = ac_exit_queue,
 		},
 
+	.elevator_attrs = ac_attrs,
 	.elevator_name = "aacp",
 	.elevator_owner = THIS_MODULE,
 };
